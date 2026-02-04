@@ -1,0 +1,337 @@
+---
+title: "Providers"
+description: "Implementing custom providers to integrate with AI APIs"
+---
+
+Providers are the bridge between the Adaptive Rate Limiter and specific API services. They define how to discover rate limits, parse response headers, and map requests to rate limit buckets.
+
+## What is a Provider?
+
+A provider implements the `ProviderInterface` to handle API-specific logic. The library is designed to be provider-agnostic, meaning it can work with any API that returns rate limit information in its headers (or body).
+
+## When Are Providers Required?
+
+| Mode | Provider Required? | Classifier Required? |
+|------|-------------------|---------------------|
+| **BASIC** | ❌ Optional | ❌ Optional |
+| **INTELLIGENT** | ✅ Required | ✅ Required |
+| **ACCOUNT** | ✅ Required | ✅ Required |
+
+## Built-in Types
+
+The library provides base classes and interfaces for building custom providers:
+
+```python
+from adaptive_rate_limiter import (
+    ProviderInterface,    # Abstract base class for providers
+    DiscoveredBucket,     # Rate limit bucket discovered from providers
+    RateLimitInfo,        # Parsed rate limit response data
+    ClassifierProtocol,   # Protocol for request classification
+    RequestMetadata,      # Metadata for classified requests
+)
+```
+
+## ProviderInterface Reference
+
+The [`ProviderInterface`](https://github.com/sethbang/adaptive-rate-limiter/blob/main/src/adaptive_rate_limiter/providers/base.py) abstract base class defines the contract for all providers:
+
+### Properties
+
+| Property | Type | Description |
+|----------|------|-------------|
+| `name` | `str` | Unique identifier for the provider |
+
+### Methods
+
+| Method | Return Type | Description |
+|--------|-------------|-------------|
+| `discover_limits(force_refresh, timeout)` | `Dict[str, DiscoveredBucket]` | Discover available rate limit buckets |
+| `parse_rate_limit_response(headers, body, status_code)` | `RateLimitInfo` | Parse rate limit info from API response |
+| `get_bucket_for_model(model_id, resource_type)` | `str` | Map a model to its rate limit bucket |
+
+## DiscoveredBucket Fields
+
+The [`DiscoveredBucket`](https://github.com/sethbang/adaptive-rate-limiter/blob/main/src/adaptive_rate_limiter/providers/base.py#L12) class holds bucket configuration:
+
+<Note>
+This is the public API class exported from `adaptive_rate_limiter`. There is a separate internal `RateLimitBucket` class in `types/rate_limit.py` with different fields used for internal queue management.
+</Note>
+
+| Field | Type | Default | Description |
+|-------|------|---------|-------------|
+| `bucket_id` | `str` | *required* | Unique identifier for the bucket |
+| `rpm_limit` | `Optional[int]` | `None` | Requests per minute limit |
+| `tpm_limit` | `Optional[int]` | `None` | Tokens per minute limit |
+| `rpm_remaining` | `Optional[int]` | `None` | Remaining requests |
+| `tpm_remaining` | `Optional[int]` | `None` | Remaining tokens |
+
+## RateLimitInfo Fields
+
+The [`RateLimitInfo`](https://github.com/sethbang/adaptive-rate-limiter/blob/main/src/adaptive_rate_limiter/providers/base.py#L35) class contains parsed response data:
+
+| Field | Type | Default | Description |
+|-------|------|---------|-------------|
+| `rpm_remaining` | `Optional[int]` | `None` | Remaining requests per minute |
+| `rpm_limit` | `Optional[int]` | `None` | Requests per minute limit |
+| `rpm_reset` | `Optional[float]` | `None` | Unix timestamp when RPM resets |
+| `tpm_remaining` | `Optional[int]` | `None` | Remaining tokens per minute |
+| `tpm_limit` | `Optional[int]` | `None` | Tokens per minute limit |
+| `tpm_reset` | `Optional[float]` | `None` | Unix timestamp when TPM resets |
+| `retry_after` | `Optional[int]` | `None` | Seconds to wait before retry |
+| `is_rate_limited` | `bool` | `False` | Whether request was rate limited |
+| `timestamp` | `float` | `time.time()` | When the info was captured |
+
+## Implementing a Custom Provider
+
+To support a new API, create a class that inherits from `ProviderInterface`:
+
+```python
+from typing import Dict, Optional, Any
+from adaptive_rate_limiter import ProviderInterface, DiscoveredBucket, RateLimitInfo
+
+
+class MyProvider(ProviderInterface):
+    """Custom provider for My API service."""
+
+    @property
+    def name(self) -> str:
+        return "my-provider"
+
+    async def discover_limits(
+        self,
+        force_refresh: bool = False,
+        timeout: float = 30.0,
+    ) -> Dict[str, DiscoveredBucket]:
+        """Discover rate limit buckets from the API.
+
+        Args:
+            force_refresh: Bypass cache and fetch fresh limits
+            timeout: Request timeout in seconds
+
+        Returns:
+            Dictionary mapping bucket IDs to DiscoveredBucket objects
+        """
+        # Return known buckets (or fetch from API if it provides a limits endpoint)
+        return {
+            "gpt-5": DiscoveredBucket(
+                bucket_id="gpt-5",
+                rpm_limit=100,
+                tpm_limit=10000,
+            ),
+            "gpt-5.1": DiscoveredBucket(
+                bucket_id="gpt-5.1",
+                rpm_limit=500,
+                tpm_limit=50000,
+            ),
+        }
+
+    def parse_rate_limit_response(
+        self,
+        headers: Dict[str, str],
+        body: Optional[Dict[str, Any]] = None,
+        status_code: Optional[int] = None,
+    ) -> RateLimitInfo:
+        """Parse rate limit information from API response.
+
+        Args:
+            headers: HTTP response headers
+            body: Optional response body
+            status_code: HTTP status code
+
+        Returns:
+            Normalized RateLimitInfo object
+        """
+        return RateLimitInfo(
+            rpm_remaining=int(headers.get("x-ratelimit-remaining-requests", 100)),
+            rpm_limit=int(headers.get("x-ratelimit-limit-requests", 100)),
+            rpm_reset=float(headers.get("x-ratelimit-reset-requests", 60)),
+            tpm_remaining=int(headers.get("x-ratelimit-remaining-tokens", 10000)),
+            tpm_limit=int(headers.get("x-ratelimit-limit-tokens", 10000)),
+            is_rate_limited=(status_code == 429),
+            retry_after=float(headers.get("retry-after", 0)) if status_code == 429 else None,
+        )
+
+    async def get_bucket_for_model(
+        self,
+        model_id: str,
+        resource_type: Optional[str] = None,
+    ) -> str:
+        """Map a model ID to its rate limit bucket.
+
+        Args:
+            model_id: The model identifier (e.g., "gpt-5")
+            resource_type: Optional resource type ("text", "image", etc.)
+
+        Returns:
+            The bucket ID for this model
+        """
+        # Simple case: model_id is the bucket ID
+        return model_id
+```
+
+### Minimal Implementation
+
+For quick prototyping, here's a minimal working example:
+
+```python
+from typing import Dict, Optional
+from adaptive_rate_limiter import ProviderInterface, DiscoveredBucket, RateLimitInfo
+
+
+class MyProvider(ProviderInterface):
+    @property
+    def name(self) -> str:
+        return "my-provider"
+
+    async def discover_limits(
+        self, force_refresh: bool = False, timeout: float = 30.0
+    ) -> Dict[str, DiscoveredBucket]:
+        return {"gpt-5": DiscoveredBucket(bucket_id="gpt-5", rpm_limit=100, tpm_limit=10000)}
+
+    def parse_rate_limit_response(self, headers, body=None, status_code=None) -> RateLimitInfo:
+        return RateLimitInfo(
+            rpm_remaining=int(headers.get("x-ratelimit-remaining-requests", 100)),
+            is_rate_limited=(status_code == 429),
+        )
+
+    async def get_bucket_for_model(self, model_id: str, resource_type=None) -> str:
+        return model_id
+```
+
+## ClassifierProtocol
+
+The [`ClassifierProtocol`](https://github.com/sethbang/adaptive-rate-limiter/blob/main/src/adaptive_rate_limiter/protocols/classifier.py) defines how to classify incoming requests for intelligent routing:
+
+```python
+from typing import Dict, Any
+from adaptive_rate_limiter import ClassifierProtocol, RequestMetadata
+
+
+class MyClassifier:
+    """Custom request classifier."""
+
+    async def classify(self, request: Dict[str, Any]) -> RequestMetadata:
+        """Classify a request and extract metadata.
+
+        Args:
+            request: The raw request dictionary
+
+        Returns:
+            RequestMetadata with classification details
+        """
+        return RequestMetadata(
+            request_id=request.get("request_id", "req-123"),
+            model_id=request.get("model", "unknown"),
+            resource_type="text",  # One of: "text", "image", "audio", "embedding", "generic"
+            # Additional optional fields:
+            # estimated_tokens: Optional[int] = None  # Token estimate for text requests
+            # priority: int = 0                       # Higher = more important
+            # submitted_at: datetime                  # Auto-populated UTC timestamp
+            # timeout: Optional[float] = 60.0         # Request timeout in seconds
+            # client_id: Optional[str] = None         # Multi-tenant client identifier
+            # endpoint: Optional[str] = None          # API endpoint for debugging
+            # requires_model: bool = True             # Whether a specific model is required
+        )
+```
+
+### Resource Types
+
+The `resource_type` field uses plain strings:
+
+| Value | Description |
+|-------|-------------|
+| `"text"` | Text generation/completion requests |
+| `"image"` | Image generation requests |
+| `"audio"` | Audio/speech requests |
+| `"embedding"` | Embedding requests |
+| `"generic"` | Fallback for unknown types |
+
+## Header Format Differences
+
+Different APIs use different header names and formats. Your provider implementation handles these differences so the core rate limiter doesn't have to.
+
+| API | Common Headers | Reset Format |
+|-----|----------------|--------------|
+| **Standard** | `x-ratelimit-limit`, `x-ratelimit-remaining`, `x-ratelimit-reset` | Timestamp or Seconds |
+| **OpenAI** | `x-ratelimit-limit-requests`, `x-ratelimit-limit-tokens` | Seconds/Time string |
+| **Anthropic** | `anthropic-ratelimit-requests-limit`, `anthropic-ratelimit-tokens-limit` | ISO 8601 |
+
+## Complete Usage Example
+
+Here's a complete example using both a provider and classifier:
+
+```python
+import asyncio
+from typing import Dict, Any, Optional
+from adaptive_rate_limiter import (
+    ProviderInterface,
+    DiscoveredBucket,
+    RateLimitInfo,
+    RequestMetadata,
+)
+
+
+class OpenAIProvider(ProviderInterface):
+    """Provider for OpenAI API."""
+
+    @property
+    def name(self) -> str:
+        return "openai"
+
+    async def discover_limits(
+        self, force_refresh: bool = False, timeout: float = 30.0
+    ) -> Dict[str, DiscoveredBucket]:
+        # OpenAI doesn't have a limits endpoint, so we return defaults
+        return {
+            "gpt-5": DiscoveredBucket(bucket_id="gpt-5", rpm_limit=500, tpm_limit=40000),
+            "gpt-5.1": DiscoveredBucket(bucket_id="gpt-5.1", rpm_limit=3500, tpm_limit=90000),
+        }
+
+    def parse_rate_limit_response(
+        self, headers: Dict[str, str], body=None, status_code=None
+    ) -> RateLimitInfo:
+        return RateLimitInfo(
+            rpm_remaining=int(headers.get("x-ratelimit-remaining-requests", 0)),
+            rpm_limit=int(headers.get("x-ratelimit-limit-requests", 0)),
+            tpm_remaining=int(headers.get("x-ratelimit-remaining-tokens", 0)),
+            tpm_limit=int(headers.get("x-ratelimit-limit-tokens", 0)),
+            is_rate_limited=(status_code == 429),
+            retry_after=float(headers.get("retry-after", 1)) if status_code == 429 else None,
+        )
+
+    async def get_bucket_for_model(self, model_id: str, resource_type=None) -> str:
+        # Normalize model names to bucket IDs
+        if model_id.startswith("gpt-5"):
+            return "gpt-5"
+        return "gpt-5.1"
+
+
+class OpenAIClassifier:
+    """Classifier for OpenAI requests."""
+
+    async def classify(self, request: Dict[str, Any]) -> RequestMetadata:
+        model = request.get("model", "gpt-5.1")
+
+        # Determine resource type from request structure
+        if "messages" in request:
+            resource_type = "text"
+        elif "input" in request and "embedding" in model:
+            resource_type = "embedding"
+        elif "prompt" in request and "dall-e" in model:
+            resource_type = "image"
+        else:
+            resource_type = "generic"
+
+        return RequestMetadata(
+            request_id=request.get("request_id", f"req-{id(request)}"),
+            model_id=model,
+            resource_type=resource_type,
+        )
+
+
+# Usage
+provider = OpenAIProvider()
+classifier = OpenAIClassifier()
+
+# These can be passed to the rate limiter scheduler
+```

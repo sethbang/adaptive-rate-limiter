@@ -1,0 +1,173 @@
+---
+title: "Quick Start"
+description: "Get started with the Adaptive Rate Limiter in minutes"
+---
+
+## Installation
+
+<Note>
+**Requirements**: Python 3.10 or later is required.
+</Note>
+
+Install the package using pip:
+
+```bash
+pip install adaptive-rate-limiter
+```
+
+For development installation:
+
+```bash
+git clone https://github.com/sethbang/adaptive-rate-limiter.git
+cd adaptive-rate-limiter
+pip install -e ".[dev]"
+```
+
+## Implementing the Client Protocol
+
+The scheduler requires a client that implements [`ClientProtocol`](https://github.com/sethbang/adaptive-rate-limiter/blob/main/src/adaptive_rate_limiter/protocols/client.py). Your client must provide three members:
+
+```python
+from typing import Dict
+from adaptive_rate_limiter import ClientProtocol
+
+class MyAPIClient:
+    """Example client implementing ClientProtocol."""
+
+    @property
+    def base_url(self) -> str:
+        return "https://api.example.com"
+
+    @property
+    def timeout(self) -> float:
+        return 30.0
+
+    def get_headers(self) -> Dict[str, str]:
+        return {"Authorization": "Bearer sk-..."}
+```
+
+| Member | Type | Description |
+|--------|------|-------------|
+| `base_url` | `str` (property) | Base URL for API requests |
+| `timeout` | `float` (property) | Request timeout in seconds |
+| `get_headers()` | `Dict[str, str]` | Returns headers for authentication |
+
+## Basic Usage
+
+Here's a complete example using Basic scheduling mode:
+
+```python
+import asyncio
+from typing import Dict
+
+# Top-level imports for common symbols
+from adaptive_rate_limiter import ClientProtocol, RequestMetadata, create_scheduler, RateLimiterConfig
+
+# SchedulerMode must be imported from subpackage
+from adaptive_rate_limiter.scheduler import SchedulerMode
+
+class MyAPIClient:
+    @property
+    def base_url(self) -> str:
+        return "https://api.example.com"
+
+    @property
+    def timeout(self) -> float:
+        return 30.0
+
+    def get_headers(self) -> Dict[str, str]:
+        return {"Authorization": "Bearer sk-..."}
+
+async def main() -> None:
+    # 1. Create a client that implements ClientProtocol
+    client = MyAPIClient()
+
+    # 2. Configure the scheduler (mode is specified here)
+    config = RateLimiterConfig(mode=SchedulerMode.BASIC)
+
+    # 3. Create the scheduler (uses mode from config)
+    scheduler = create_scheduler(client=client, config=config)
+
+    # 4. Start the scheduler
+    await scheduler.start()
+    try:
+        # 5. Create request metadata
+        metadata = RequestMetadata(
+            request_id="req-001",
+            model_id="gpt-5",
+            resource_type="text",
+        )
+
+        # 6. Define your API call
+        async def my_request() -> Dict[str, str]:
+            return {"response": "Hello from API!"}
+
+        # 7. Submit the request
+        result = await scheduler.submit_request(metadata, my_request)
+        print(f"Result: {result}")
+    finally:
+        # 8. Always stop the scheduler when done
+        await scheduler.stop()
+
+if __name__ == "__main__":
+    asyncio.run(main())
+```
+
+## RequestMetadata Fields
+
+[`RequestMetadata`](https://github.com/sethbang/adaptive-rate-limiter/blob/main/src/adaptive_rate_limiter/types/request.py) describes each request you submit:
+
+| Field | Type | Required | Default | Description |
+|-------|------|----------|---------|-------------|
+| `request_id` | `str` | Yes | — | Unique identifier for the request |
+| `model_id` | `str` | Yes | — | Model or endpoint identifier |
+| `resource_type` | `str` | Yes | — | Resource category (e.g., `"text"`, `"image"`) |
+| `estimated_tokens` | `Optional[int]` | No | `None` | Estimated token count for capacity planning |
+| `priority` | `int` | No | `0` | Request priority (higher = more urgent) |
+| `submitted_at` | `datetime` | No | *auto* | UTC timestamp when request was submitted (auto-populated) |
+| `timeout` | `Optional[float]` | No | `60.0` | Request timeout in seconds |
+| `client_id` | `Optional[str]` | No | `None` | Optional client identifier |
+| `endpoint` | `Optional[str]` | No | `None` | Specific endpoint path |
+| `requires_model` | `bool` | No | `True` | Whether request requires model access |
+
+## Basic Mode Defaults
+
+When using `SchedulerMode.BASIC`, the following defaults apply from [`RateLimiterConfig`](configuration):
+
+| Setting | Default Value | Description |
+|---------|---------------|-------------|
+| `max_failures` | `20` | Maximum failures within window before circuit break |
+| `backoff_base` | `2.0` | Base for exponential backoff calculation |
+| `max_backoff` | `60.0` seconds | Maximum backoff time |
+
+<Note>
+This table shows key failure handling defaults. See [Configuration](configuration) for the complete list of 30+ configuration options.
+</Note>
+
+## Imports Reference
+
+```python
+# From main package (recommended for most symbols)
+from adaptive_rate_limiter import (
+    ClientProtocol,
+    RequestMetadata,
+    RateLimiterError,
+    Scheduler,
+    create_scheduler,
+    RateLimiterConfig,
+)
+
+# From scheduler subpackage (for SchedulerMode only)
+from adaptive_rate_limiter.scheduler import SchedulerMode
+```
+
+<Note>
+`SchedulerMode` is intentionally NOT exported from the top-level package to keep the main API simple. Import it from `adaptive_rate_limiter.scheduler`. All other scheduler symbols (`Scheduler`, `create_scheduler`, `RateLimiterConfig`) are available from the top-level package.
+</Note>
+
+## Next Steps
+
+- **Configuration**: Learn about [configuration options](configuration) to tune the limiter.
+- **Backends**: Switch to [RedisBackend](backends) for distributed applications.
+- **Streaming**: Handle [streaming responses](streaming) correctly.
+- **Providers**: Integrate with [custom API providers](providers).

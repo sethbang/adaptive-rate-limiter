@@ -1,0 +1,316 @@
+---
+title: "Configuration"
+description: "Detailed configuration options for the Adaptive Rate Limiter"
+---
+
+The Adaptive Rate Limiter is highly configurable to suit various deployment scenarios and API requirements. Configuration is handled through two **separate** classes: `RateLimiterConfig` and `StateConfig`.
+
+## Architecture Overview
+
+<Info>
+**Important:** `RateLimiterConfig` and `StateConfig` are **separate configuration objects**, not nested. They are passed to different components:
+- `RateLimiterConfig` → `Scheduler`
+- `StateConfig` → `StateManager`
+</Info>
+
+```python
+from adaptive_rate_limiter.scheduler import (
+    RateLimiterConfig,
+    StateConfig,
+    SchedulerMode,
+    CachePolicy,
+)
+```
+
+## RateLimiterConfig
+
+The `RateLimiterConfig` class controls the core behavior of the scheduler. It has 24 configurable fields.
+
+```python
+from adaptive_rate_limiter.scheduler import RateLimiterConfig, SchedulerMode
+
+config = RateLimiterConfig(
+    mode=SchedulerMode.INTELLIGENT,
+    max_concurrent_executions=100,
+    max_queue_size=1000,
+    overflow_policy="reject",
+    enable_rate_limiting=True,
+    rate_limit_buffer_ratio=0.9,
+)
+```
+
+### Core Scheduling
+
+| Option | Type | Default | Description |
+|--------|------|---------|-------------|
+| `mode` | `SchedulerMode` | `INTELLIGENT` | Operation mode: `BASIC`, `INTELLIGENT`, or `ACCOUNT`. |
+| `max_concurrent_executions` | `int` | `100` | Maximum number of concurrent executions allowed. |
+| `max_queue_size` | `int` | `1000` | Maximum size of each bucket's request queue. |
+| `overflow_policy` | `str` | `"reject"` | Policy when queue is full: `"reject"` or `"drop_oldest"`. |
+| `scheduler_interval` | `float` | `0.01` | Interval between scheduler loops in seconds. |
+
+### Request Processing
+
+| Option | Type | Default | Description |
+|--------|------|---------|-------------|
+| `request_timeout` | `float` | `30.0` | Request timeout duration in seconds. |
+| `enable_priority_scheduling` | `bool` | `True` | Enable priority-based request scheduling. |
+
+### Rate Limiting Integration
+
+| Option | Type | Default | Description |
+|--------|------|---------|-------------|
+| `enable_rate_limiting` | `bool` | `True` | Enable rate limiting enforcement. |
+| `rate_limit_buffer_ratio` | `float` | `0.9` | Ratio of rate limit to use as buffer (0.9 = use 90% of limit). |
+
+### Failure Handling
+
+| Option | Type | Default | Description |
+|--------|------|---------|-------------|
+| `failure_window` | `float` | `30.0` | Time window for failure counting in seconds. |
+| `max_failures` | `int` | `20` | Maximum failures within window before circuit break. |
+| `backoff_base` | `float` | `2.0` | Base for exponential backoff calculation. |
+| `max_backoff` | `float` | `60.0` | Maximum backoff time in seconds. |
+
+### Graceful Degradation
+
+| Option | Type | Default | Description |
+|--------|------|---------|-------------|
+| `enable_graceful_degradation` | `bool` | `True` | Enable graceful degradation on failures. |
+| `health_check_interval` | `float` | `30.0` | Interval between health checks in seconds. |
+| `max_consecutive_failures` | `int` | `3` | Maximum consecutive failures before degradation. |
+| `conservative_multiplier` | `float` | `0.6` | Multiplier for conservative capacity during degradation. |
+
+### Metrics and Monitoring
+
+| Option | Type | Default | Description |
+|--------|------|---------|-------------|
+| `metrics_enabled` | `bool` | `True` | Enable metrics collection. |
+| `prometheus_host` | `str` | `"0.0.0.0"` | Prometheus metrics host. |
+| `prometheus_port` | `int` | `9090` | Prometheus metrics port. |
+| `metrics_export_interval` | `float` | `60.0` | Interval for metrics export in seconds. |
+| `enable_performance_tracking` | `bool` | `True` | Enable detailed performance tracking. |
+
+### State Management
+
+| Option | Type | Default | Description |
+|--------|------|---------|-------------|
+| `enable_state_persistence` | `bool` | `True` | Enable state persistence to backend. |
+
+### Testing Support
+
+| Option | Type | Default | Description |
+|--------|------|---------|-------------|
+| `test_mode` | `bool` | `False` | Enable test mode with relaxed constraints. |
+| `test_rate_multiplier` | `float` | `1.0` | Rate limit multiplier for testing. |
+
+### RateLimiterConfig Validation Rules
+
+The following validation rules are enforced when creating a `RateLimiterConfig`:
+
+| Field | Constraint |
+|-------|------------|
+| `rate_limit_buffer_ratio` | Must be `0 < value <= 1.0` |
+| `conservative_multiplier` | Must be `0 < value <= 1.0` |
+| `max_concurrent_executions` | Must be `>= 1` |
+| `max_queue_size` | Must be `>= 1` |
+| `overflow_policy` | Must be `"reject"` or `"drop_oldest"` |
+
+```python
+# Valid configuration
+config = RateLimiterConfig(
+    rate_limit_buffer_ratio=0.85,  # OK: within (0, 1.0]
+    conservative_multiplier=0.5,    # OK: within (0, 1.0]
+    max_concurrent_executions=50,   # OK: >= 1
+    overflow_policy="drop_oldest",  # OK: valid option
+)
+
+# Invalid configuration (will raise ValidationError)
+config = RateLimiterConfig(
+    rate_limit_buffer_ratio=1.5,    # ERROR: > 1.0
+)
+```
+
+## StateConfig
+
+The `StateConfig` class controls advanced state management, caching, and persistence. It has 25 configurable fields and is passed **separately** to the `StateManager`.
+
+```python
+from adaptive_rate_limiter.scheduler import StateConfig, CachePolicy
+
+state_config = StateConfig(
+    cache_policy=CachePolicy.WRITE_THROUGH,
+    cache_ttl=1.0,
+    max_cache_size=1000,
+    is_production=True,
+    namespace="my-tenant",
+)
+```
+
+### Cache Configuration
+
+| Option | Type | Default | Description |
+|--------|------|---------|-------------|
+| `cache_ttl` | `float` | `1.0` | Cache TTL in seconds. |
+| `max_cache_size` | `Optional[int]` | `1000` | Maximum number of cache entries before LRU eviction. |
+| `cache_policy` | `CachePolicy` | `WRITE_THROUGH` | Cache write policy: `WRITE_THROUGH`, `WRITE_BACK`, or `WRITE_AROUND`. |
+| `warn_write_back_production` | `bool` | `True` | Emit warning if using `WRITE_BACK` in production. |
+| `is_production` | `bool` | `False` | Flag indicating production environment. |
+| `acknowledge_write_back_risk` | `bool` | `False` | Explicitly acknowledge WRITE_BACK risk in production. Required when `is_production=True` and `cache_policy=WRITE_BACK`. |
+
+<Warning>
+**Production Safety Warning**: When using `CachePolicy.WRITE_BACK` in production, you MUST set `acknowledge_write_back_risk=True`. This ensures you understand that WRITE_BACK may lose data if the process crashes before the cache is flushed. Failure to set this field will raise a `ValueError` at startup.
+</Warning>
+
+### Batch Operations
+
+| Option | Type | Default | Description |
+|--------|------|---------|-------------|
+| `batch_size` | `int` | `50` | Number of items to process in batch operations. |
+| `batch_timeout` | `float` | `0.1` | Timeout for batch operations in seconds. |
+
+### Flush Retry Settings
+
+| Option | Type | Default | Description |
+|--------|------|---------|-------------|
+| `flush_max_retries` | `int` | `5` | Maximum retry attempts for cache flush before dropping updates. |
+| `flush_backoff_base` | `float` | `1.0` | Base delay in seconds for exponential backoff between flush retries. |
+| `flush_backoff_max` | `float` | `60.0` | Maximum delay in seconds for exponential backoff between flush retries. |
+
+### Cleanup and Maintenance
+
+| Option | Type | Default | Description |
+|--------|------|---------|-------------|
+| `cleanup_interval` | `float` | `30.0` | Interval in seconds between cleanup cycles. |
+| `enable_background_cleanup` | `bool` | `True` | Enable automatic background cleanup of expired entries. |
+| `cleanup_task_cancel_timeout` | `float` | `2.0` | Timeout in seconds for canceling cleanup tasks during shutdown. |
+| `cleanup_task_wait_timeout` | `float` | `1.0` | Timeout in seconds for waiting on cleanup task completion. |
+
+### State Persistence
+
+| Option | Type | Default | Description |
+|--------|------|---------|-------------|
+| `state_ttl` | `int` | `3600` | Time-to-live for state entries in backend storage (seconds). |
+
+### Reservation Cleanup
+
+| Option | Type | Default | Description |
+|--------|------|---------|-------------|
+| `reservation_cleanup_interval` | `float` | `3600.0` | Interval in seconds between reservation cleanup cycles. |
+| `reservation_ttl` | `float` | `300.0` | Time-to-live for reservation entries in seconds. |
+
+### Account State
+
+| Option | Type | Default | Description |
+|--------|------|---------|-------------|
+| `account_state_ttl` | `float` | `86400.0` | Time-to-live for account state entries in seconds (24 hours). |
+| `account_state_max_size` | `Optional[int]` | `10000` | Maximum number of account state entries before eviction. |
+
+### Versioning and Recovery
+
+| Option | Type | Default | Description |
+|--------|------|---------|-------------|
+| `enable_versioning` | `bool` | `True` | Enable state versioning for recovery and rollback. |
+| `max_versions` | `int` | `10` | Maximum number of versions to keep per state entry. |
+
+### Concurrency Control
+
+| Option | Type | Default | Description |
+|--------|------|---------|-------------|
+| `lock_free_reads` | `bool` | `True` | Enable lock-free read operations for better performance. |
+| `max_concurrent_operations` | `int` | `100` | Maximum number of concurrent state operations allowed. |
+
+### Namespace Isolation
+
+| Option | Type | Default | Description |
+|--------|------|---------|-------------|
+| `namespace` | `str` | `"default"` | State namespace for multi-tenant isolation. |
+
+### StateConfig Validation Rules
+
+The following validation rules are enforced when creating a `StateConfig`:
+
+| Field | Constraint |
+|-------|------------|
+| `cache_ttl` | Must be positive (`> 0`) |
+| `max_cache_size` | Must be at least `1` (or `None` for unlimited) |
+| `batch_size` | Must be at least `1` |
+| `state_ttl` | Must be at least `60` seconds |
+
+```python
+# Valid configuration
+state_config = StateConfig(
+    cache_ttl=0.5,         # OK: positive value
+    max_cache_size=500,    # OK: >= 1
+    batch_size=25,         # OK: >= 1
+    state_ttl=300,         # OK: >= 60
+)
+
+# Invalid configurations (will raise ValueError)
+StateConfig(cache_ttl=-1.0)    # ERROR: must be positive
+StateConfig(max_cache_size=0)  # ERROR: must be at least 1
+StateConfig(batch_size=0)      # ERROR: must be at least 1
+StateConfig(state_ttl=30)      # ERROR: must be at least 60 seconds
+```
+
+## Enums
+
+### SchedulerMode
+
+Controls the scheduling strategy used by the rate limiter.
+
+```python
+from adaptive_rate_limiter.scheduler import SchedulerMode
+
+# Available modes:
+SchedulerMode.BASIC        # Simple rate limiting without advanced features
+SchedulerMode.INTELLIGENT  # Adaptive rate limiting with learning capabilities
+SchedulerMode.ACCOUNT      # Account-aware rate limiting for multi-tenant scenarios
+```
+
+### CachePolicy
+
+Controls how state changes are synchronized with the backend.
+
+```python
+from adaptive_rate_limiter.scheduler import CachePolicy
+
+# Available policies:
+CachePolicy.WRITE_THROUGH  # Writes immediately to backend (safest, highest latency)
+CachePolicy.WRITE_BACK     # Writes asynchronously in batches (fastest, risk of data loss)
+CachePolicy.WRITE_AROUND   # Writes bypass cache, reads may be stale
+```
+
+## Complete Example
+
+```python
+from adaptive_rate_limiter.scheduler import (
+    RateLimiterConfig,
+    StateConfig,
+    SchedulerMode,
+    CachePolicy,
+)
+
+# Configure the rate limiter (goes to Scheduler)
+rate_limiter_config = RateLimiterConfig(
+    mode=SchedulerMode.INTELLIGENT,
+    max_concurrent_executions=50,
+    max_queue_size=500,
+    overflow_policy="reject",
+    enable_rate_limiting=True,
+    rate_limit_buffer_ratio=0.85,
+    failure_window=30.0,
+    max_failures=10,
+    enable_graceful_degradation=True,
+    metrics_enabled=True,
+    prometheus_port=9090,
+)
+
+# Configure state management (goes to StateManager)
+state_config = StateConfig(
+    cache_policy=CachePolicy.WRITE_THROUGH,
+    cache_ttl=0.5,
+    max_cache_size=500,
+    is_production=True,
+)
+```

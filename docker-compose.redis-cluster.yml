@@ -1,0 +1,201 @@
+# Redis Cluster for Integration Testing (with Failover Support)
+#
+# This docker-compose file sets up a 6-node Redis Cluster for testing
+# the cluster-specific features of the adaptive-rate-limiter, including
+# failover scenarios.
+#
+# Configuration: 3 masters + 3 replicas (each master has 1 replica)
+#   - Nodes 1-3 (ports 7001-7003): Master nodes
+#   - Nodes 4-6 (ports 7004-7006): Replica nodes
+#
+# Usage:
+#   1. Start the cluster:
+#      docker-compose -f docker-compose.redis-cluster.yml up -d
+#
+#   2. Wait for cluster initialization (about 15 seconds)
+#
+#   3. Set the environment variable:
+#      export REDIS_CLUSTER_URL="redis://localhost:7001"
+#
+#   4. Run the cluster tests:
+#      uv run pytest tests/integration/test_redis_cluster.py -v
+#
+#   5. Stop the cluster:
+#      docker-compose -f docker-compose.redis-cluster.yml down
+#
+#   6. Clean up volumes for fresh start (if needed):
+#      docker-compose -f docker-compose.redis-cluster.yml down -v
+#
+# Note: This creates a 6-node cluster with 3 masters and 3 replicas.
+# Uses host network mode to ensure cluster node discovery works from the host.
+# The replica configuration enables failover testing.
+#
+# Failover Testing:
+#   Failover tests (TestRedisClusterFailover) require the Docker SDK for Python
+#   to control container lifecycle. Install with: uv add --group dev docker
+#   Tests will be skipped if the docker package is not available.
+
+services:
+  redis-node-1:
+    image: redis:7-alpine
+    container_name: redis-cluster-node-1
+    command: >
+      redis-server
+      --cluster-enabled yes
+      --cluster-config-file nodes.conf
+      --cluster-node-timeout 5000
+      --cluster-announce-ip 127.0.0.1
+      --cluster-announce-port 7001
+      --appendonly yes
+      --port 7001
+    network_mode: host
+    volumes:
+      - redis-node-1-data:/data
+    healthcheck:
+      test: ["CMD", "redis-cli", "-p", "7001", "ping"]
+      interval: 5s
+      timeout: 3s
+      retries: 5
+
+  redis-node-2:
+    image: redis:7-alpine
+    container_name: redis-cluster-node-2
+    command: >
+      redis-server
+      --cluster-enabled yes
+      --cluster-config-file nodes.conf
+      --cluster-node-timeout 5000
+      --cluster-announce-ip 127.0.0.1
+      --cluster-announce-port 7002
+      --appendonly yes
+      --port 7002
+    network_mode: host
+    volumes:
+      - redis-node-2-data:/data
+    healthcheck:
+      test: ["CMD", "redis-cli", "-p", "7002", "ping"]
+      interval: 5s
+      timeout: 3s
+      retries: 5
+
+  redis-node-3:
+    image: redis:7-alpine
+    container_name: redis-cluster-node-3
+    command: >
+      redis-server
+      --cluster-enabled yes
+      --cluster-config-file nodes.conf
+      --cluster-node-timeout 5000
+      --cluster-announce-ip 127.0.0.1
+      --cluster-announce-port 7003
+      --appendonly yes
+      --port 7003
+    network_mode: host
+    volumes:
+      - redis-node-3-data:/data
+    healthcheck:
+      test: ["CMD", "redis-cli", "-p", "7003", "ping"]
+      interval: 5s
+      timeout: 3s
+      retries: 5
+
+  redis-node-4:
+    image: redis:7-alpine
+    container_name: redis-cluster-node-4
+    command: >
+      redis-server
+      --cluster-enabled yes
+      --cluster-config-file nodes.conf
+      --cluster-node-timeout 5000
+      --cluster-announce-ip 127.0.0.1
+      --cluster-announce-port 7004
+      --appendonly yes
+      --port 7004
+    network_mode: host
+    volumes:
+      - redis-node-4-data:/data
+    healthcheck:
+      test: ["CMD", "redis-cli", "-p", "7004", "ping"]
+      interval: 5s
+      timeout: 3s
+      retries: 5
+
+  redis-node-5:
+    image: redis:7-alpine
+    container_name: redis-cluster-node-5
+    command: >
+      redis-server
+      --cluster-enabled yes
+      --cluster-config-file nodes.conf
+      --cluster-node-timeout 5000
+      --cluster-announce-ip 127.0.0.1
+      --cluster-announce-port 7005
+      --appendonly yes
+      --port 7005
+    network_mode: host
+    volumes:
+      - redis-node-5-data:/data
+    healthcheck:
+      test: ["CMD", "redis-cli", "-p", "7005", "ping"]
+      interval: 5s
+      timeout: 3s
+      retries: 5
+
+  redis-node-6:
+    image: redis:7-alpine
+    container_name: redis-cluster-node-6
+    command: >
+      redis-server
+      --cluster-enabled yes
+      --cluster-config-file nodes.conf
+      --cluster-node-timeout 5000
+      --cluster-announce-ip 127.0.0.1
+      --cluster-announce-port 7006
+      --appendonly yes
+      --port 7006
+    network_mode: host
+    volumes:
+      - redis-node-6-data:/data
+    healthcheck:
+      test: ["CMD", "redis-cli", "-p", "7006", "ping"]
+      interval: 5s
+      timeout: 3s
+      retries: 5
+
+  redis-cluster-init:
+    image: redis:7-alpine
+    container_name: redis-cluster-init
+    depends_on:
+      redis-node-1:
+        condition: service_healthy
+      redis-node-2:
+        condition: service_healthy
+      redis-node-3:
+        condition: service_healthy
+      redis-node-4:
+        condition: service_healthy
+      redis-node-5:
+        condition: service_healthy
+      redis-node-6:
+        condition: service_healthy
+    command: >
+      sh -c "
+        echo 'Checking cluster status...' &&
+        sleep 2 &&
+        if redis-cli -p 7001 cluster info 2>/dev/null | grep -q 'cluster_state:ok'; then
+          echo 'Cluster already initialized, skipping creation'
+        else
+          echo 'Creating cluster with 3 masters and 3 replicas...' &&
+          redis-cli --cluster create 127.0.0.1:7001 127.0.0.1:7002 127.0.0.1:7003 127.0.0.1:7004 127.0.0.1:7005 127.0.0.1:7006 --cluster-replicas 1 --cluster-yes &&
+          echo 'Cluster created successfully!'
+        fi
+      "
+    network_mode: host
+
+volumes:
+  redis-node-1-data:
+  redis-node-2-data:
+  redis-node-3-data:
+  redis-node-4-data:
+  redis-node-5-data:
+  redis-node-6-data:

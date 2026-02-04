@@ -1,0 +1,251 @@
+# Release Workflow - Publishes package to PyPI when a version tag is pushed
+#
+# Triggers:
+#   - Push of version tags (v*.*.* e.g., v1.0.0, v1.0.1)
+#   - Manual workflow_dispatch for emergency releases
+#
+# Required Secrets:
+#   - TESTPYPI_API_TOKEN: API token for TestPyPI (if not using OIDC)
+#   - PYPI_API_TOKEN: API token for PyPI (if not using OIDC)
+#
+# Recommended: Configure OIDC Trusted Publishing on PyPI/TestPyPI instead of API tokens
+#   - Go to PyPI project settings -> Publishing -> Add trusted publisher
+#   - Set repository owner/name, workflow file name, and environment name
+#
+# GitHub Environment Setup:
+#   - Create 'pypi' environment in repo settings for production deployment protection
+#   - Add required reviewers for manual approval before PyPI publish
+
+name: Release
+
+on:
+  push:
+    tags:
+      - "v*.*.*"
+  workflow_dispatch:
+    inputs:
+      tag:
+        description: "Tag to release (e.g., v1.0.0)"
+        required: true
+        type: string
+
+# Permissions required for OIDC trusted publishing
+permissions:
+  contents: write  # For creating releases and uploading assets
+  id-token: write  # For OIDC authentication with PyPI
+
+env:
+  PYTHON_VERSION: "3.12"
+
+jobs:
+  # ===========================================================================
+  # Verify Job - Run checks before publishing
+  # ===========================================================================
+  verify:
+    name: Verify
+    runs-on: ubuntu-latest
+
+    steps:
+      - name: Checkout repository
+        uses: actions/checkout@v4
+        with:
+          # Fetch tag for version verification
+          ref: ${{ github.event.inputs.tag || github.ref }}
+
+      - name: Set up Python
+        uses: actions/setup-python@v5
+        with:
+          python-version: ${{ env.PYTHON_VERSION }}
+
+      - name: Install uv
+        uses: astral-sh/setup-uv@v4
+
+      - name: Install dependencies
+        run: uv sync --no-progress
+
+      - name: Verify version matches git tag
+        run: |
+          VERSION=$(grep 'version = ' pyproject.toml | head -1 | cut -d'"' -f2)
+          # Handle both push trigger and workflow_dispatch
+          if [ -n "${{ github.event.inputs.tag }}" ]; then
+            TAG="${{ github.event.inputs.tag }}"
+            TAG=${TAG#v}
+          else
+            TAG=${GITHUB_REF#refs/tags/v}
+          fi
+
+          echo "Package version: $VERSION"
+          echo "Git tag version: $TAG"
+
+          if [ "$VERSION" != "$TAG" ]; then
+            echo "::error::Version mismatch: pyproject.toml=$VERSION, tag=v$TAG"
+            echo "Please ensure the version in pyproject.toml matches the git tag."
+            exit 1
+          fi
+
+          echo "✅ Version verified: $VERSION"
+
+      - name: Run linting
+        run: uv run ruff check .
+
+      - name: Run type checking
+        run: uv run mypy src/
+
+      - name: Run unit tests
+        run: uv run pytest tests/unit -v --tb=short
+
+  # ===========================================================================
+  # Build Job - Build the package
+  # ===========================================================================
+  build:
+    name: Build Package
+    runs-on: ubuntu-latest
+    needs: verify
+
+    steps:
+      - name: Checkout repository
+        uses: actions/checkout@v4
+        with:
+          ref: ${{ github.event.inputs.tag || github.ref }}
+
+      - name: Set up Python
+        uses: actions/setup-python@v5
+        with:
+          python-version: ${{ env.PYTHON_VERSION }}
+
+      - name: Install uv
+        uses: astral-sh/setup-uv@v4
+
+      - name: Build package
+        run: uv build
+
+      - name: List built artifacts
+        run: ls -la dist/
+
+      - name: Upload build artifacts
+        uses: actions/upload-artifact@v4
+        with:
+          name: dist
+          path: dist/
+          retention-days: 7
+
+  # ===========================================================================
+  # Publish to TestPyPI - Dry run before production
+  # ===========================================================================
+  publish-testpypi:
+    name: Publish to TestPyPI
+    runs-on: ubuntu-latest
+    needs: build
+    environment: testpypi  # Optional: add environment protection
+
+    steps:
+      - name: Download build artifacts
+        uses: actions/download-artifact@v4
+        with:
+          name: dist
+          path: dist/
+
+      - name: Publish to TestPyPI
+        uses: pypa/gh-action-pypi-publish@release/v1
+        with:
+          repository-url: https://test.pypi.org/legacy/
+          # OIDC trusted publishing is used by default when id-token: write permission is set
+          # If OIDC is not configured, uncomment below and add TESTPYPI_API_TOKEN secret:
+          # password: ${{ secrets.TESTPYPI_API_TOKEN }}
+          skip-existing: true
+          verbose: true
+
+  # ===========================================================================
+  # Publish to PyPI - Production release
+  # ===========================================================================
+  publish-pypi:
+    name: Publish to PyPI
+    runs-on: ubuntu-latest
+    needs: publish-testpypi
+    # Use 'pypi' environment for deployment protection (requires manual approval)
+    environment: pypi
+
+    steps:
+      - name: Download build artifacts
+        uses: actions/download-artifact@v4
+        with:
+          name: dist
+          path: dist/
+
+      - name: Publish to PyPI
+        uses: pypa/gh-action-pypi-publish@release/v1
+        with:
+          # OIDC trusted publishing is used by default when id-token: write permission is set
+          # If OIDC is not configured, uncomment below and add PYPI_API_TOKEN secret:
+          # password: ${{ secrets.PYPI_API_TOKEN }}
+          verbose: true
+
+  # ===========================================================================
+  # Create GitHub Release - Attach artifacts and release notes
+  # ===========================================================================
+  github-release:
+    name: Create GitHub Release
+    runs-on: ubuntu-latest
+    needs: publish-pypi
+
+    steps:
+      - name: Checkout repository
+        uses: actions/checkout@v4
+        with:
+          ref: ${{ github.event.inputs.tag || github.ref }}
+
+      - name: Download build artifacts
+        uses: actions/download-artifact@v4
+        with:
+          name: dist
+          path: dist/
+
+      - name: Get tag name
+        id: tag
+        run: |
+          if [ -n "${{ github.event.inputs.tag }}" ]; then
+            echo "tag=${{ github.event.inputs.tag }}" >> $GITHUB_OUTPUT
+          else
+            echo "tag=${GITHUB_REF#refs/tags/}" >> $GITHUB_OUTPUT
+          fi
+
+      - name: Extract release notes from CHANGELOG
+        id: changelog
+        run: |
+          # Extract the section for this version from CHANGELOG.md
+          VERSION="${{ steps.tag.outputs.tag }}"
+          VERSION_NUM=${VERSION#v}
+
+          # Try to extract release notes between this version and the next
+          # This assumes a standard changelog format with ## [version] headers
+          NOTES=$(sed -n "/^## \[${VERSION_NUM}\]/,/^## \[/p" CHANGELOG.md | sed '$d' | tail -n +2)
+
+          if [ -z "$NOTES" ]; then
+            # Fallback: try without brackets
+            NOTES=$(sed -n "/^## ${VERSION_NUM}/,/^## /p" CHANGELOG.md | sed '$d' | tail -n +2)
+          fi
+
+          if [ -z "$NOTES" ]; then
+            # If no changelog entry found, use auto-generated notes
+            NOTES="Release ${VERSION}
+
+            See [CHANGELOG.md](CHANGELOG.md) for details."
+          fi
+
+          # Write to file for the release action
+          echo "$NOTES" > release_notes.md
+          cat release_notes.md
+
+      - name: Create GitHub Release
+        uses: softprops/action-gh-release@v2
+        with:
+          tag_name: ${{ steps.tag.outputs.tag }}
+          name: Release ${{ steps.tag.outputs.tag }}
+          body_path: release_notes.md
+          files: |
+            dist/*
+          draft: false
+          prerelease: ${{ contains(steps.tag.outputs.tag, '-') }}
+          generate_release_notes: true  # Append auto-generated notes
+        env:
+          GITHUB_TOKEN: ${{ secrets.GITHUB_TOKEN }}

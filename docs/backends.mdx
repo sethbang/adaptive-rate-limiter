@@ -1,0 +1,281 @@
+---
+title: "Backends"
+description: "Memory and Redis backend guides for state storage"
+---
+
+The Adaptive Rate Limiter supports pluggable backends for state storage. The choice of backend depends on your deployment architecture.
+
+## Imports
+
+All backend classes and types are available from the `backends` submodule:
+
+```python
+from adaptive_rate_limiter.backends import (
+    BaseBackend, HealthCheckResult, validate_safety_margin, MemoryBackend, RedisBackend,
+    FallbackRateLimiter, InFlightRequest, ModelLimits,
+)
+```
+
+<Note>
+  `FallbackRateLimiter`, `InFlightRequest`, and `ModelLimits` are advanced types primarily used internally by the scheduler. Most users only need `BaseBackend`, `MemoryBackend`, or `RedisBackend`.
+</Note>
+
+## BaseBackend Interface
+
+[`BaseBackend`](https://github.com/sethbang/adaptive-rate-limiter/blob/main/src/adaptive_rate_limiter/backends/base.py#L68) is the abstract base class that all backends must implement. It defines 25 abstract methods organized into functional categories:
+
+### State Management
+
+| Method | Description |
+|--------|-------------|
+| `get_state()` | Retrieve current rate limiter state |
+| `set_state()` | Store rate limiter state |
+| `get_all_states()` | Get states for all tracked models |
+| `clear()` | Clear all stored state |
+
+### Capacity Operations
+
+| Method | Description |
+|--------|-------------|
+| `check_and_reserve_capacity()` | Atomically check availability and reserve capacity |
+| `release_reservation()` | Release a held reservation |
+| `release_streaming_reservation()` | Release a streaming reservation with refund-based release |
+| `check_capacity()` | Check if capacity is available without reserving |
+
+### Request Tracking
+
+| Method | Description |
+|--------|-------------|
+| `record_request()` | Record a completed request |
+| `record_failure()` | Record a failed request for circuit breaker |
+| `get_failure_count()` | Get current failure count |
+| `is_circuit_broken()` | Check if circuit breaker is open |
+
+### Rate Limit Updates
+
+| Method | Description |
+|--------|-------------|
+| `update_rate_limits()` | Update limits from 2xx response headers |
+| `get_rate_limits()` | Get current rate limit values |
+| `reserve_capacity()` | Reserve capacity for a request |
+| `release_reservation_by_id()` | Release a specific reservation by ID |
+
+### Caching
+
+| Method | Description |
+|--------|-------------|
+| `cache_bucket_info()` | Cache bucket/tier information |
+| `get_cached_bucket_info()` | Retrieve cached bucket info |
+| `cache_model_info()` | Cache model metadata |
+| `get_cached_model_info()` | Retrieve cached model info |
+
+### Health & Maintenance
+
+| Method | Description |
+|--------|-------------|
+| `health_check()` | Perform health check, returns [`HealthCheckResult`](https://github.com/sethbang/adaptive-rate-limiter/blob/main/src/adaptive_rate_limiter/backends/base.py#L28) |
+| `get_all_stats()` | Get statistics for all tracked models |
+| `cleanup()` | Perform cleanup operations |
+| `clear_failures()` | Reset failure count for circuit breaker |
+| `force_circuit_break()` | Manually trigger circuit breaker |
+
+## MemoryBackend
+
+The [`MemoryBackend`](https://github.com/sethbang/adaptive-rate-limiter/blob/main/src/adaptive_rate_limiter/backends/memory.py#L24) stores all state in the application's memory. It is the simplest backend and requires no external dependencies.
+
+### Use Cases
+
+- **Single-process applications**: When you have only one instance of your application running.
+- **Testing and Development**: For local development or running tests where persistence is not required.
+- **Non-distributed environments**: Where rate limits do not need to be shared across multiple nodes.
+
+<Warning>
+`MemoryBackend` is NOT suitable for distributed systems. State is not shared between processes.
+</Warning>
+
+### Configuration
+
+```python
+from adaptive_rate_limiter.backends import MemoryBackend
+
+backend = MemoryBackend(
+    namespace="rate_limiter_memory",  # Key prefix
+    key_ttl=3600,                     # TTL in seconds
+    released_reservations_ttl=3600.0,
+    released_reservations_cleanup_interval=1800.0,
+)
+```
+
+| Parameter | Default | Description |
+|-----------|---------|-------------|
+| `namespace` | `"rate_limiter_memory"` | Namespace for key isolation. |
+| `key_ttl` | `3600` | Default TTL for keys in seconds. |
+| `released_reservations_ttl` | `3600.0` | TTL for released reservation tracking. |
+| `released_reservations_cleanup_interval` | `1800.0` | Interval for cleaning up old released reservations. |
+
+### Lifecycle Management
+
+`MemoryBackend` requires explicit lifecycle management for cleanup tasks:
+
+```python
+from adaptive_rate_limiter.backends import MemoryBackend
+
+backend = MemoryBackend()
+
+# Start the backend (starts cleanup task)
+await backend.start()
+
+try:
+    # ... use backend for rate limiting ...
+    pass
+finally:
+    # Stop the backend (stops cleanup task)
+    await backend.stop()
+```
+
+## RedisBackend
+
+The [`RedisBackend`](https://github.com/sethbang/adaptive-rate-limiter/blob/main/src/adaptive_rate_limiter/backends/redis.py#L221) uses Redis for distributed state management. It ensures that rate limits are enforced globally across all instances of your application.
+
+### Use Cases
+
+- **Distributed systems**: When you have multiple application instances (e.g., Kubernetes pods, serverless functions).
+- **Production environments**: Where high availability and persistence are required.
+- **Shared rate limits**: When multiple services need to share the same rate limit quotas.
+
+### Features
+
+- **Atomic Operations**: Uses Lua scripts to ensure race-condition-free operations.
+- **Distributed Locking**: Prevents race conditions when updating shared state.
+- **Orphan Recovery**: Automatically recovers reservations from crashed instances.
+- **Circuit Breaker**: Automatically falls back to `MemoryBackend` if Redis becomes unavailable.
+- **Cluster Support**: Compatible with Redis Cluster.
+
+### Configuration
+
+```python
+from adaptive_rate_limiter.backends import RedisBackend
+
+backend = RedisBackend(
+    redis_url="redis://localhost:6379",
+    account_id="default",
+    namespace="rate_limiter",
+    key_ttl=86400,         # 24 hours
+    max_connections=10,
+    cluster_mode=False,    # True for Redis Cluster
+)
+```
+
+| Parameter | Default | Description |
+|-----------|---------|-------------|
+| `redis_url` | `"redis://localhost:6379"` | Redis connection URL. |
+| `redis_client` | `None` | Optional pre-configured Redis client. |
+| `account_id` | `"default"` | Account ID for key scoping. |
+| `namespace` | `"rate_limiter"` | Namespace prefix for keys. |
+| `key_ttl` | `86400` | Default TTL for keys in seconds (24h). |
+| `max_connections` | `10` | Maximum connections per pool. |
+| `req_map_ttl` | `1800` | TTL for request mappings in seconds (30min). |
+| `stale_buffer` | `10` | Buffer time for stale window detection in seconds. |
+| `orphan_recovery_interval` | `30` | Interval for orphan recovery scans in seconds. |
+| `max_request_timeout` | `300` | Max time before request is considered orphaned in seconds (5min). |
+| `max_token_delta` | `120` | Maximum valid token reset delta in seconds. |
+| `log_validation_failures` | `True` | Whether to log when header validation fails. |
+| `cluster_mode` | `False` | Whether to use Redis Cluster client. |
+| `startup_nodes` | `None` | `Optional[list[tuple[str, int]]]` - List of (host, port) tuples for Redis Cluster multi-node discovery. Use this when connecting to a Redis Cluster with multiple possible entry points for high availability. |
+
+### Environment Variables
+
+The following environment variables can be used for Redis configuration:
+
+| Variable | Description |
+|----------|-------------|
+| `REDIS_URL` | Connection string for Redis backend (e.g., `redis://localhost:6379`) |
+| `REDIS_CLUSTER_URL` | Connection string for Redis Cluster (e.g., `redis://node1:6379,node2:6379,node3:6379`) |
+
+These environment variables provide a convenient way to configure Redis connections without hardcoding URLs in your application code, especially useful for container deployments and CI/CD pipelines.
+
+### Context Manager Pattern (Recommended)
+
+The `RedisBackend` supports async context manager for automatic connection and cleanup:
+
+```python
+from adaptive_rate_limiter.backends import RedisBackend
+
+backend = RedisBackend(
+    redis_url="redis://localhost:6379",
+    account_id="default",
+)
+
+async with backend as rb:
+    # Auto-connects and starts orphan recovery
+    # ... use backend for rate limiting ...
+    pass
+# Auto-cleanup on exit
+```
+
+### Fallback Mode
+
+The `RedisBackend` includes a robust fallback mechanism. If Redis becomes unavailable (e.g., connection timeout, network partition), the backend automatically switches to a local `MemoryBackend`.
+
+- **Conservative Limits**: Applies conservative limits (default 1/20th of actual) to prevent overwhelming the API.
+- **Per-Request Rate Limiting**: Enforces a minimum delay between requests to prevent burst synchronization.
+- **Automatic Recovery**: Periodically checks Redis availability and seamlessly switches back when it recovers.
+
+## Fallback Behavior
+
+The [`FallbackRateLimiter`](https://github.com/sethbang/adaptive-rate-limiter/blob/main/src/adaptive_rate_limiter/backends/base.py) provides graceful degradation when the primary backend is unavailable.
+
+```python
+from adaptive_rate_limiter.backends import FallbackRateLimiter
+
+# FallbackRateLimiter is used internally when backend connection fails
+# It allows requests through with a configurable rate limit
+```
+
+Key behaviors:
+- Automatically activated during backend connection failures
+- Uses conservative rate limits to prevent overwhelming external APIs
+- Returns to normal operation when backend recovers
+
+## Lua Scripts
+
+The [`RedisBackend`](https://github.com/sethbang/adaptive-rate-limiter/blob/main/src/adaptive_rate_limiter/backends/redis.py#L221) uses 6 Lua scripts for atomic operations:
+
+| Script | Purpose |
+|--------|---------|
+| [`distributed_check_and_reserve`](https://github.com/sethbang/adaptive-rate-limiter/blob/main/src/adaptive_rate_limiter/backends/lua/distributed_check_and_reserve.lua) | Atomic capacity check and reservation |
+| [`distributed_update_rate_limits`](https://github.com/sethbang/adaptive-rate-limiter/blob/main/src/adaptive_rate_limiter/backends/lua/distributed_update_rate_limits.lua) | Sync state from 2xx response headers |
+| [`distributed_update_rate_limits_429`](https://github.com/sethbang/adaptive-rate-limiter/blob/main/src/adaptive_rate_limiter/backends/lua/distributed_update_rate_limits_429.lua) | Handle 429 (rate limited) responses |
+| [`distributed_release_capacity`](https://github.com/sethbang/adaptive-rate-limiter/blob/main/src/adaptive_rate_limiter/backends/lua/distributed_release_capacity.lua) | Release pending gauge reservations |
+| [`distributed_recover_orphan`](https://github.com/sethbang/adaptive-rate-limiter/blob/main/src/adaptive_rate_limiter/backends/lua/distributed_recover_orphan.lua) | Recover reservations from crashed requests |
+| [`distributed_release_streaming`](https://github.com/sethbang/adaptive-rate-limiter/blob/main/src/adaptive_rate_limiter/backends/lua/distributed_release_streaming.lua) | Refund-based streaming capacity release |
+
+All scripts are designed to be atomic, preventing race conditions in distributed environments.
+
+## StateManager Integration
+
+The backends integrate with [`StateManager`](https://github.com/sethbang/adaptive-rate-limiter/blob/main/src/adaptive_rate_limiter/scheduler/state/__init__.py) for higher-level state operations:
+
+```python
+from adaptive_rate_limiter.backends import MemoryBackend
+from adaptive_rate_limiter.scheduler import StateManager, StateConfig
+
+backend = MemoryBackend()
+state_manager = StateManager(backend=backend, config=StateConfig())
+
+# StateManager provides higher-level state coordination
+```
+
+## Choosing a Backend
+
+| Feature | MemoryBackend | RedisBackend |
+|---------|---------------|--------------|
+| **Persistence** | No (lost on restart) | Yes (Redis persistence) |
+| **Distributed** | No | Yes |
+| **Performance** | Fastest (in-memory) | Fast (network RTT) |
+| **Complexity** | Low | Medium (requires Redis) |
+| **Dependencies** | None | `redis` package |
+
+<Tip>
+For most production deployments involving multiple workers or instances, **RedisBackend** is the recommended choice.
+</Tip>

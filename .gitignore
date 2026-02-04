@@ -1,0 +1,37 @@
+# Python-generated files
+__pycache__/
+*.py[oc]
+build/
+dist/
+wheels/
+*.egg-info
+
+# Virtual environments
+.venv
+.python-version
+docs-validation
+
+# Development tool caches
+.pytest_cache
+.nox/
+.mypy_cache/
+.ruff_cache/
+
+# Coverage and reports
+.coverage
+.kilocode
+docs/offline
+coverage.*
+
+# Environment files
+.env*
+!.env.example
+.vscode/settings.json
+tests/reports
+
+
+# macOS
+.DS_Store
+
+docs/architecture
+.vscode

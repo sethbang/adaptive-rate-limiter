@@ -1,0 +1,59 @@
+{
+  "$schema": "https://mintlify.com/docs.json",
+  "theme": "maple",
+  "name": "Adaptive Rate Limiter",
+  "description": "Provider-agnostic, adaptive rate limiting for AI/ML APIs",
+  "colors": {
+    "primary": "#3B82F6",
+    "light": "#F8FAFC",
+    "dark": "#0F172A"
+  },
+  "navigation": {
+    "dropdowns": [
+      {
+        "dropdown": "Documentation",
+        "icon": "book",
+        "groups": [
+          {
+            "group": "Getting Started",
+            "pages": [
+              "introduction",
+              "quickstart"
+            ]
+          },
+          {
+            "group": "Core Concepts",
+            "pages": [
+              "configuration",
+              "backends",
+              "providers"
+            ]
+          },
+          {
+            "group": "Features",
+            "pages": [
+              "streaming",
+              "reservation-tracking"
+            ]
+          },
+          {
+            "group": "Reference",
+            "pages": [
+              "exceptions",
+              "observability"
+            ]
+          }
+        ]
+      }
+    ]
+  },
+  "logo": {
+    "light": "/logo.svg",
+    "dark": "/logo.svg"
+  },
+  "footer": {
+    "socials": {
+      "github": "https://github.com/sethbang/adaptive-rate-limiter"
+    }
+  }
+}

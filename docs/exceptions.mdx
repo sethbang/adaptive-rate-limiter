@@ -1,0 +1,250 @@
+---
+title: "Exceptions"
+description: "Error handling guide for the Adaptive Rate Limiter"
+---
+
+The Adaptive Rate Limiter provides a comprehensive exception hierarchy to help you handle various error conditions gracefully.
+
+## Import Statement
+
+All public exceptions can be imported directly from the main package:
+
+```python
+from adaptive_rate_limiter import (
+    RateLimiterError,
+    CapacityExceededError,
+    BucketNotFoundError,
+    ReservationCapacityError,
+    BackendConnectionError,
+    BackendOperationError,
+    ConfigurationError,
+    QueueOverflowError,
+    TooManyFailedRequestsError,
+)
+```
+
+## Exception Hierarchy
+
+All exceptions inherit from the base `RateLimiterError`, which itself inherits from Python's built-in `Exception`.
+
+```
+Exception
+└── RateLimiterError                    # Base exception for all rate limiter errors
+    ├── CapacityExceededError          # Rate limit exceeded
+    ├── BucketNotFoundError            # Missing bucket
+    ├── ReservationCapacityError       # Reservation tracker at capacity
+    ├── BackendConnectionError         # Backend connection failures
+    ├── BackendOperationError          # Backend operation failures
+    ├── ConfigurationError             # Invalid configuration
+    ├── QueueOverflowError             # Queue full
+    └── TooManyFailedRequestsError     # Circuit breaker tripped
+```
+
+## Public Exceptions
+
+These exceptions are exported in `__all__` and are part of the public API.
+
+### `RateLimiterError`
+
+The base class for all exceptions in the library. Catching this will catch any error raised by the rate limiter.
+
+```python
+try:
+    result = await scheduler.submit_request(...)
+except RateLimiterError as e:
+    print(f"Rate limiter error: {e}")
+```
+
+### `CapacityExceededError`
+
+Raised when a request cannot be fulfilled because the rate limit has been exceeded and the scheduler cannot queue it (e.g., queue full or immediate rejection policy).
+
+**Constructor:**
+```python
+__init__(self, message: str, bucket_id: Optional[str] = None, retry_after: Optional[float] = None)
+```
+
+**Attributes:**
+- `bucket_id` (`Optional[str]`): The ID of the bucket that is rate limited.
+- `retry_after` (`Optional[float]`): Suggested wait time in seconds before retrying.
+
+**Usage:**
+```python
+raise CapacityExceededError("Rate limit exceeded", bucket_id="openai:gpt-5", retry_after=5.0)
+```
+
+**Handling:**
+```python
+try:
+    result = await scheduler.submit_request(...)
+except CapacityExceededError as e:
+    print(f"Bucket {e.bucket_id} exceeded. Retry after {e.retry_after}s")
+```
+
+### `BucketNotFoundError`
+
+Raised when attempting to access a rate limit bucket that does not exist and cannot be automatically created.
+
+**Constructor:**
+```python
+__init__(self, bucket_id: str)
+```
+
+This constructor auto-generates the message: `"Rate limit bucket not found: {bucket_id}"`
+
+**Attributes:**
+- `bucket_id` (`str`): The ID of the bucket that was not found.
+
+**Usage:**
+```python
+raise BucketNotFoundError("openai:gpt-5")
+# Results in message: "Rate limit bucket not found: openai:gpt-5"
+```
+
+**Handling:**
+```python
+try:
+    result = await scheduler.submit_request(...)
+except BucketNotFoundError as e:
+    print(f"Bucket not found: {e.bucket_id}")
+    # Handle missing bucket - check configuration
+```
+
+### `ReservationCapacityError`
+
+Raised when the internal `ReservationTracker` is full. This usually indicates a massive backlog of uncompleted requests or a memory leak in reservation cleanup.
+
+### `BackendConnectionError`
+
+Raised when the backend (e.g., Redis) cannot be reached. Handle this to implement connection retry logic or fallback behavior.
+
+### `BackendOperationError`
+
+Raised when a backend operation fails (e.g., Redis command error, serialization failure).
+
+### `ConfigurationError`
+
+Raised when the `RateLimiterConfig` or `StateConfig` is invalid. Typically raised during scheduler initialization.
+
+### `QueueOverflowError`
+
+Raised when the internal request queue for a bucket is full. This exception can be caught to implement custom queue overflow handling.
+
+**Constructor:**
+```python
+__init__(self, message: str, queue_key: Optional[str] = None)
+```
+
+**Attributes:**
+- `queue_key` (`Optional[str]`): The key identifying which queue overflowed.
+
+**Handling:**
+```python
+try:
+    result = await scheduler.submit_request(...)
+except QueueOverflowError as e:
+    if e.queue_key:
+        print(f"Queue '{e.queue_key}' is full")
+    # Implement backpressure or return 503 to client
+    raise
+```
+
+### `TooManyFailedRequestsError`
+
+Raised when too many requests have failed within a time window. This is a circuit-breaker mechanism to prevent cascading failures when the upstream service is degraded.
+
+**Constructor:**
+```python
+__init__(
+    self,
+    message: str = "Too many failed requests",
+    failure_count: Optional[int] = None,
+    window_seconds: Optional[float] = None,
+    threshold: Optional[int] = None,
+)
+```
+
+**Attributes:**
+- `failure_count` (`Optional[int]`): The number of failed requests in the current window.
+- `window_seconds` (`Optional[float]`): The time window in seconds over which failures are tracked.
+- `threshold` (`Optional[int]`): The failure threshold that was exceeded.
+
+**Usage:**
+```python
+raise TooManyFailedRequestsError(
+    "Circuit breaker tripped",
+    failure_count=15,
+    window_seconds=60.0,
+    threshold=10
+)
+```
+
+**Handling:**
+```python
+try:
+    result = await scheduler.submit_request(...)
+except TooManyFailedRequestsError as e:
+    print(
+        f"Circuit breaker tripped: {e.failure_count} failures "
+        f"in {e.window_seconds}s (threshold: {e.threshold})"
+    )
+    # Back off or return 503 to client
+    raise
+```
+
+## Handling Exceptions
+
+Here is an example of comprehensive exception handling in your application:
+
+```python
+from adaptive_rate_limiter import (
+    RateLimiterError,
+    CapacityExceededError,
+    BucketNotFoundError,
+    BackendConnectionError,
+    BackendOperationError,
+    ConfigurationError,
+)
+
+async def make_request():
+    try:
+        result = await scheduler.submit_request(...)
+        return result
+    except CapacityExceededError as e:
+        # The system is overloaded
+        if e.retry_after:
+            print(f"Rate limit exceeded. Retry after {e.retry_after} seconds.")
+        if e.bucket_id:
+            print(f"Rate limited bucket: {e.bucket_id}")
+        # Implement your own backoff or return 429 to client
+        raise
+    except BucketNotFoundError as e:
+        # Unknown bucket - likely a configuration issue
+        print(f"Unknown bucket: {e}")
+        raise
+    except BackendConnectionError as e:
+        # Redis/backend unavailable
+        print(f"Backend connection failed: {e}")
+        # Consider fallback behavior
+        raise
+    except BackendOperationError as e:
+        # Backend command failed
+        print(f"Backend operation failed: {e}")
+        raise
+    except RateLimiterError as e:
+        # Catch-all for other library errors
+        print(f"Rate limiter error: {e}")
+        raise
+```
+
+## Best Practices
+
+<Tip>
+1. **Catch specific exceptions first**: Handle `CapacityExceededError` separately to implement retry logic with the provided `retry_after` hint.
+
+2. **Use the base exception as a fallback**: Catch `RateLimiterError` last to handle any unexpected library errors.
+
+3. **Handle queue overflow appropriately**: `QueueOverflowError` indicates the system is under heavy load. Consider implementing backpressure or returning HTTP 503 to clients.
+
+4. **Log backend errors**: `BackendConnectionError` and `BackendOperationError` indicate infrastructure issues that should be monitored.
+</Tip>

@@ -1,0 +1,135 @@
+# pytest.toml - Consolidated test configuration for adaptive-rate-limiter
+# Requires pytest >= 9.0.0 (pytest.toml highest precedence support)
+
+[pytest]
+# Test discovery patterns
+python_files = ["test_*.py"]
+python_classes = ["Test*"]
+python_functions = ["test_*"]
+
+# Test paths
+testpaths = ["tests"]
+pythonpath = ["src"]
+
+# Asyncio configuration
+asyncio_mode = "auto"
+asyncio_default_fixture_loop_scope = "function"
+
+# Recursion exclusions
+norecursedirs = [".hypothesis", ".git", "__pycache__", ".pytest_cache"]
+
+# Coverage configuration
+addopts = [
+    "--strict-markers",
+    "--verbose",
+    "--tb=short",
+    "--cov=src/adaptive_rate_limiter",
+    "--cov-branch",
+    "--cov-report=term-missing:skip-covered",
+    "--cov-report=html:tests/reports/coverage/html",
+    "--cov-report=xml:tests/reports/coverage/coverage.xml",
+    "--cov-report=json:tests/reports/coverage/coverage.json",
+    "--cov-fail-under=80",
+]
+
+# Parallel execution (disabled by default, enable with -n auto)
+# addopts = "-n auto"
+
+# Output and reporting
+console_output_style = "progress"
+junit_family = "xunit2"
+junit_logging = "all"
+junit_log_passing_tests = true
+
+# Markers definition
+markers = [
+    # Test categories
+    "unit: Unit tests - isolated component testing",
+    "integration: Integration tests - component interaction testing",
+    "e2e: End-to-end tests - full workflow testing",
+    "cluster: Tests that require a Redis cluster",
+
+    # Speed categories
+    "fast: Fast tests (< 100ms)",
+    "slow: Slow tests (> 100ms)",
+
+    # Requirements
+    "requires_redis: Tests that require Redis",
+    "requires_redis_pool: Tests requiring Redis with connection pool (50+ connections with pipelining)",
+    "requires_docker: Tests that require Docker",
+
+    # Special categories
+    "smoke: Smoke tests - quick validation",
+    "regression: Regression tests",
+    "stress: Stress/load tests",
+    "performance: Performance tests",
+    "flaky: Known flaky tests (use sparingly)",
+    "skip_ci: Skip in CI environment",
+
+    # Component-specific markers
+    "backend: Backend implementation tests",
+    "scheduler: Scheduler tests",
+    "streaming: Streaming tests",
+    "reservation: Reservation tracker tests",
+    "strategy: Strategy mode tests",
+    "observability: Metrics/observability tests",
+]
+
+# Logging
+log_cli = false
+log_cli_level = "INFO"
+log_cli_format = "%(asctime)s [%(levelname)8s] %(name)s - %(message)s"
+log_cli_date_format = "%Y-%m-%d %H:%M:%S"
+
+# Warnings
+filterwarnings = [
+    "error::UserWarning",
+    "ignore::DeprecationWarning",
+    "ignore::PendingDeprecationWarning",
+    "ignore::ResourceWarning",
+    "ignore:.*unclosed.*:ResourceWarning",
+    "ignore::pytest.PytestConfigWarning",
+    # AsyncMock coroutine warnings in Python 3.13+
+    "ignore:coroutine .* was never awaited:RuntimeWarning",
+]
+
+# Timeout (requires pytest-timeout plugin)
+# Uncomment below lines if pytest-timeout is installed
+# timeout = 300
+# timeout_method = "thread"
+
+# Minimum pytest version
+minversion = "9.0"
+
+# Doctest
+doctest_optionflags = "NORMALIZE_WHITESPACE IGNORE_EXCEPTION_DETAIL"
+
+[coverage.run]
+source = ["src/adaptive_rate_limiter"]
+branch = true
+parallel = true
+omit = ["*/__main__.py", "*/_internal/*"]
+
+[coverage.paths]
+source = ["adaptive_rate_limiter", "src/adaptive_rate_limiter"]
+
+[coverage.report]
+fail_under = 80
+show_missing = true
+skip_covered = true
+exclude_lines = [
+    "pragma: no cover",
+    "def __repr__",
+    "if self.debug:",
+    "if settings.DEBUG",
+    "raise AssertionError",
+    "raise NotImplementedError",
+    "if 0:",
+    "if __name__ == .__main__.:",
+    "if TYPE_CHECKING:",
+    "pass",
+    "@abstractmethod",
+]
+
+[coverage.html]
+directory = "tests/reports/coverage/html"
