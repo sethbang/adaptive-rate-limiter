@@ -419,10 +419,13 @@ class MemoryBackend(BaseBackend):
 
             # Calculate dynamic reset_at for Token Bucket BEFORE checking capacity
             # This ensures reset_at is always up-to-date, even when capacity check fails
-            if state_data.get("remaining_requests", 0) < 1:
+            remaining_req_for_reset = state_data.get("remaining_requests")
+            if remaining_req_for_reset is None:
+                remaining_req_for_reset = 0
+            if remaining_req_for_reset < 1:
                 requests_per_sec = rpm_limit / 60.0 if rpm_limit else 0
                 if requests_per_sec > 0:
-                    needed = 1.0 - state_data.get("remaining_requests", 0)
+                    needed = 1.0 - remaining_req_for_reset
                     time_to_refill = max(0, needed / requests_per_sec)
                     reset_at = datetime.now(timezone.utc) + timedelta(
                         seconds=time_to_refill
