@@ -10,7 +10,7 @@ include = ["src/", "src/adaptive_rate_limiter/backends/lua/*.lua"]
 
 [project]
 name = "adaptive-rate-limiter"
-version = "1.0.0"
+version = "1.0.1"
 description = "Adaptive rate limiting for API clients with multi-provider support"
 readme = "README.md"
 license = "Apache-2.0"

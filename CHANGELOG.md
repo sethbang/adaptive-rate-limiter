@@ -9,6 +9,12 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 _No unreleased changes._
 
+## [1.0.1] - 2026-02-04
+
+### Fixed
+
+- **MemoryBackend**: Fixed `TypeError` when `remaining_requests` is explicitly `None` in state data. The `dict.get()` method returns `None` if the key exists with value `None`, not the default value. This caused failures on Windows with Python 3.10-3.12.
+
 ## [1.0.0] - 2026-01-28
 
 Initial public release of Adaptive Rate Limiter.
@@ -115,5 +121,6 @@ Initial public release of Adaptive Rate Limiter.
   - `[full]`: All optional dependencies
 - **License**: Apache-2.0
 
-[Unreleased]: https://github.com/sethbang/adaptive-rate-limiter/compare/v1.0.0...HEAD
+[Unreleased]: https://github.com/sethbang/adaptive-rate-limiter/compare/v1.0.1...HEAD
+[1.0.1]: https://github.com/sethbang/adaptive-rate-limiter/compare/v1.0.0...v1.0.1
 [1.0.0]: https://github.com/sethbang/adaptive-rate-limiter/releases/tag/v1.0.0
