@@ -73,8 +73,17 @@ jobs:
       - name: Run bandit security scan
         run: uv run bandit -r src/
 
-      - name: Run pip-audit for dependency vulnerabilities
-        run: uv run pip-audit
+      - name: Export runtime dependency manifest
+        # Audit what users actually install (pyproject runtime + published
+        # extras), not the dev/test toolchain. CVEs in pytest, pip, uv,
+        # etc. don't ship in the wheel.
+        run: |
+          uv export --no-dev --extra redis --extra metrics \
+            --format requirements-txt --no-emit-project --no-hashes \
+            > runtime-requirements.txt
+
+      - name: Run pip-audit on runtime dependencies
+        run: uv run pip-audit --no-deps --disable-pip -r runtime-requirements.txt
 
   test:
     name: Test (Python ${{ matrix.python-version }}, ${{ matrix.os }})
