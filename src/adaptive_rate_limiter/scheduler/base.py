@@ -146,6 +146,14 @@ class BaseScheduler(ABC):
         self.test_rate_multiplier = test_rate_multiplier
         self.default_rate_limits = default_rate_limits or {}
 
+        # Circuit breaker is optional and may be attached by callers/tests.
+        # Default to None (no breaker) and the always-closed bypass to False so
+        # mode strategies that gate on these attributes (e.g. INTELLIGENT) do
+        # not AttributeError on the first request. Tests override these to
+        # short-circuit the breaker check.
+        self.circuit_breaker: Any = None
+        self._circuit_breaker_always_closed: bool = False
+
         # Setup mode strategy
         self._setup_mode_strategy(scheduling_strategy)
 

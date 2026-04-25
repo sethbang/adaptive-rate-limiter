@@ -167,6 +167,17 @@ class RateLimitState(BaseModel):
 
     Tracks rate limit information including remaining requests/tokens,
     reset times, and verification status.
+
+    Persistence note:
+        Redis hash fields can only hold bytes/str/int/float, but cold-start
+        dumps of this model include ``None`` (unset limits/timestamps) and
+        ``bool`` (``is_verified``), both of which redis-py rejects with
+        ``DataError``. The Redis backend handles this at the boundary: it
+        drops ``None`` entries and coerces ``bool`` → ``int`` (0/1) before
+        HSET. On read, missing fields are rehydrated to their declared
+        defaults and Pydantic re-coerces 0/1 back to bool. This keeps
+        callers free to emit partially-populated state from cold-start or
+        fallback paths without coercing to sentinels themselves.
     """
 
     model_id: str

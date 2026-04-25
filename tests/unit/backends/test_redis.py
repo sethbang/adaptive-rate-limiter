@@ -744,6 +744,59 @@ class TestRedisBackend:
             await backend.clear()
 
     @pytest.mark.asyncio
+    async def test_set_state_strips_none_values(self, backend, mock_redis):
+        """Regression: ``RateLimitState.create_fallback_state()`` produces
+        dicts with ``None`` defaults (e.g. ``request_limit``,
+        ``last_request_time``); redis-py rejects ``NoneType`` in HSET
+        mappings with ``DataError``. ``set_state`` must drop those entries
+        before HSET so cold-start writes from the fallback path persist.
+        """
+        from adaptive_rate_limiter.scheduler.state.models import RateLimitState
+
+        fallback = RateLimitState.create_fallback_state(model_id="m-1")
+        state_dict = fallback.model_dump(mode="json")
+        # Sanity: the fallback state contains at least one None field
+        # (`last_request_time` and `request_limit` / `token_limit` default to None).
+        assert any(v is None for v in state_dict.values())
+
+        await backend.set_state("m-1", state_dict)
+
+        mock_redis.hset.assert_awaited_once()
+        kwargs = mock_redis.hset.await_args.kwargs
+        sent = kwargs["mapping"]
+        assert all(v is not None for v in sent.values()), (
+            f"None leaked into HSET mapping: {sent!r}"
+        )
+        # ``is_verified`` is a bool; redis-py rejects bool, so the backend
+        # must coerce to int.
+        assert "is_verified" in sent
+        assert sent["is_verified"] == 0
+        assert not isinstance(sent["is_verified"], bool)
+        # Non-None fields must still be present
+        assert "model_id" in sent
+        assert sent["model_id"] == "m-1"
+
+    @pytest.mark.asyncio
+    async def test_set_state_coerces_bool_to_int(self, backend, mock_redis):
+        """Regression: redis-py rejects ``bool`` in HSET mappings (it is a
+        subclass of int but explicitly disallowed by the encoder).
+        ``set_state`` must coerce booleans to int."""
+        await backend.set_state("k", {"flag_true": True, "flag_false": False, "n": 5})
+        sent = mock_redis.hset.await_args.kwargs["mapping"]
+        assert sent == {"flag_true": 1, "flag_false": 0, "n": 5}
+        for v in sent.values():
+            assert not isinstance(v, bool)
+
+    @pytest.mark.asyncio
+    async def test_set_state_skips_hset_when_all_none(self, backend, mock_redis):
+        """If a caller passes a dict that is entirely ``None`` after
+        sanitization, we must not issue an empty HSET (redis-py would
+        reject that)."""
+        await backend.set_state("m-1", {"a": None, "b": None})
+        mock_redis.hset.assert_not_called()
+        mock_redis.expire.assert_not_called()
+
+    @pytest.mark.asyncio
     async def test_ensure_connected_failure(self, backend, mock_redis):
         """Test ensure_connected failure."""
         from redis.exceptions import ConnectionError

@@ -1666,13 +1666,28 @@ class RedisBackend(BaseBackend):
             return None
 
     async def set_state(self, key: str, state: dict[str, Any]) -> None:
-        """Set state for a key (model)."""
+        """Set state for a key (model).
+
+        Redis hash fields can only hold bytes/str/int/float. redis-py's
+        encoder raises ``DataError`` on ``NoneType`` and ``bool``, both of
+        which appear in ``RateLimitState`` cold-start dumps (None for
+        unset limits/timestamps, ``is_verified: bool``). We drop ``None``
+        entries and coerce ``bool`` → ``int`` (0/1); on read,
+        ``RateLimitState``'s Pydantic model rehydrates missing keys to
+        their declared defaults and re-coerces 0/1 back to bool.
+        """
         try:
             redis_client = await self._ensure_connected()
             state_key = self._get_state_key(key)
 
-            if state:
-                await redis_client.hset(state_key, mapping=state)
+            sanitized: dict[str, Any] = {}
+            for k, v in state.items():
+                if v is None:
+                    continue
+                # bool is a subclass of int but redis-py rejects it explicitly.
+                sanitized[k] = int(v) if isinstance(v, bool) else v
+            if sanitized:
+                await redis_client.hset(state_key, mapping=sanitized)
                 await redis_client.expire(state_key, self.key_ttl)
         except (ConnectionError, TimeoutError, ResponseError, RedisError) as e:
             logger.error(f"Redis error setting state for {key}: {e}")

@@ -95,6 +95,25 @@ class TestScheduler:
         # Config is BASIC from fixture
         assert metrics["scheduler_mode"] == "basic"
 
+    def test_circuit_breaker_attrs_initialized_intelligent_mode(self, mock_client):
+        """Regression: BaseScheduler must initialize ``circuit_breaker`` and
+        ``_circuit_breaker_always_closed`` so the INTELLIGENT mode strategy
+        does not raise ``AttributeError`` on the first ``submit_request``.
+
+        Mirrors the venice-ai factory wiring (Scheduler + Provider +
+        Classifier + StateManager) where the bug was first observed.
+        """
+        scheduler = Scheduler(
+            client=mock_client,
+            config=RateLimiterConfig(mode=SchedulerMode.INTELLIGENT),
+            provider=Mock(),
+            classifier=Mock(),
+            state_manager=Mock(),
+        )
+        # Both attributes must be readable without AttributeError.
+        assert scheduler.circuit_breaker is None
+        assert scheduler._circuit_breaker_always_closed is False
+
 
 class TestCreateScheduler:
     @pytest.fixture

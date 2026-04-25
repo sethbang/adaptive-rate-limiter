@@ -9,6 +9,23 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 _No unreleased changes._
 
+## [1.0.2] - 2026-04-25
+
+### Fixed
+
+- **Scheduler**: Initialize `circuit_breaker` and `_circuit_breaker_always_closed` on
+  `BaseScheduler` so the INTELLIGENT mode strategy no longer raises
+  `AttributeError: 'Scheduler' object has no attribute '_circuit_breaker_always_closed'`
+  on the first `submit_request` when callers wire `Scheduler` + `Provider` +
+  `Classifier` + `StateManager` themselves (e.g. the Venice AI SDK factory).
+- **RedisBackend**: Sanitize state dicts before issuing `HSET mapping=...`.
+  redis-py's encoder rejects both `NoneType` and `bool`, both of which
+  appear in `RateLimitState` cold-start dumps (`request_limit`,
+  `token_limit`, `bucket_id`, `last_request_time` default to `None`;
+  `is_verified` is a `bool`). `set_state` now drops `None` entries and
+  coerces `bool` → `int` (0/1). On read, missing fields are rehydrated to
+  their declared Pydantic defaults and 0/1 is coerced back to `bool`.
+
 ## [1.0.1] - 2026-02-04
 
 ### Fixed
@@ -121,6 +138,7 @@ Initial public release of Adaptive Rate Limiter.
   - `[full]`: All optional dependencies
 - **License**: Apache-2.0
 
-[Unreleased]: https://github.com/sethbang/adaptive-rate-limiter/compare/v1.0.1...HEAD
+[Unreleased]: https://github.com/sethbang/adaptive-rate-limiter/compare/v1.0.2...HEAD
+[1.0.2]: https://github.com/sethbang/adaptive-rate-limiter/compare/v1.0.1...v1.0.2
 [1.0.1]: https://github.com/sethbang/adaptive-rate-limiter/compare/v1.0.0...v1.0.1
 [1.0.0]: https://github.com/sethbang/adaptive-rate-limiter/releases/tag/v1.0.0

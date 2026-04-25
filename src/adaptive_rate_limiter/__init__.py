@@ -42,10 +42,10 @@ Main Exports:
 Note: RedisBackend requires the 'redis' extra. Install with:
     pip install adaptive-rate-limiter[redis]
 
-Version: 1.0.0
+Version: 1.0.2
 """
 
-__version__ = "1.0.0"
+__version__ = "1.0.2"
 
 from typing import TYPE_CHECKING
 
