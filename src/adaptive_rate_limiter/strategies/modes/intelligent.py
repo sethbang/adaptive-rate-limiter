@@ -253,12 +253,9 @@ class IntelligentModeStrategy(BaseSchedulingModeStrategy):
         self._cleanup_interval = 1.0
         self._cleanup_task: asyncio.Task[None] | None = None
 
-        # Cold start probing
+        # Cold start probing. Cold-start stampede protection is provided by
+        # the probe gating in _try_process_next_request_intelligent().
         self._bucket_probes: set[str] = set()
-
-        # Per-bucket initialization locks to prevent cold-start race conditions
-        self._bucket_init_locks: dict[str, asyncio.Lock] = {}
-        self._initialized_buckets: set[str] = set()
 
         # ===== RESERVATION TRACKING =====
         # Reservation tracking via composition (delegates storage operations)
@@ -299,27 +296,6 @@ class IntelligentModeStrategy(BaseSchedulingModeStrategy):
             streaming_metrics=self._streaming_metrics,
             register_callback=self._streaming_cleanup_manager.register,
         )
-
-    async def _ensure_bucket_initialized(self, bucket_id: str) -> None:
-        """
-        Ensure a bucket is initialized with a lock to prevent cold-start races.
-
-        This prevents multiple concurrent requests from all seeing "empty state"
-        and firing simultaneously before the first response establishes the rate limit.
-        """
-        if bucket_id in self._initialized_buckets:
-            return  # Fast path - no lock needed
-
-        # Use setdefault for atomic lock creation to prevent race conditions
-        # where multiple coroutines might try to create a lock for the same bucket
-        lock = self._bucket_init_locks.setdefault(bucket_id, asyncio.Lock())
-
-        async with lock:
-            if bucket_id in self._initialized_buckets:
-                return  # Double-check pattern
-
-            # Mark as initialized so future requests skip the lock
-            self._initialized_buckets.add(bucket_id)
 
     async def submit_request(
         self, metadata: RequestMetadata, request_func: Callable[[], Awaitable[Any]]
@@ -446,6 +422,18 @@ class IntelligentModeStrategy(BaseSchedulingModeStrategy):
         Cancels all background tasks and cleans up resources.
         """
         self._running = False
+
+        # Cancel in-flight executor tasks first, while the state manager and
+        # backend are still alive, so their shielded cancellation cleanup
+        # (capacity release / state sync) can complete.
+        async with self._task_lock:
+            active_tasks = list(self._active_tasks.values())
+            self._active_tasks.clear()
+        for task in active_tasks:
+            if not task.done():
+                task.cancel()
+        if active_tasks:
+            await asyncio.gather(*active_tasks, return_exceptions=True)
 
         # Stop reset watcher (cancels all watcher tasks)
         await self._reset_watcher.stop()
@@ -937,9 +925,6 @@ class IntelligentModeStrategy(BaseSchedulingModeStrategy):
 
         # Estimate tokens for this request
         estimated_tokens = metadata.estimated_tokens or 0
-
-        # Ensure bucket is initialized (Cold Start Protection)
-        await self._ensure_bucket_initialized(bucket_id)
 
         # ATOMIC OPERATION - No race condition!
         (

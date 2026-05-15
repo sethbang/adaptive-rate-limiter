@@ -330,6 +330,10 @@ class StateManager:
         self._running = True
         await self.cache.start()
 
+        # Start the backend so its own background tasks (e.g. the in-memory
+        # backend's released-reservation cleanup loop) actually run.
+        await self.backend.start()
+
         self._batch_task = asyncio.create_task(self._batch_loop())
         self._cleanup_task = asyncio.create_task(self._cleanup_loop())
 
@@ -360,6 +364,9 @@ class StateManager:
                 await self._cleanup_task
 
         await self.cache.stop()
+
+        # Stop the backend's background tasks (mirrors backend.start()).
+        await self.backend.stop()
 
         # Restore original signal handlers
         self._restore_signal_handlers()

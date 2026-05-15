@@ -173,6 +173,30 @@ class TestIntelligentModeStrategyStopLifecycle:
 
         mock_state_manager.stop.assert_called_once()
 
+    @pytest.mark.asyncio
+    async def test_stop_cancels_in_flight_executor_tasks(self, strategy):
+        """stop() must cancel and await in-flight executor tasks.
+
+        Regression: stop() cancelled the background cleanup tasks but
+        ignored _active_tasks, so in-flight request executors kept running
+        against a torn-down state manager.
+        """
+        await strategy.start()
+
+        async def long_running():
+            await asyncio.sleep(60)
+
+        task = asyncio.create_task(long_running())
+        async with strategy._task_lock:
+            strategy._active_tasks["task-1"] = task
+            strategy._active_request_count += 1
+
+        await strategy.stop()
+
+        assert task.done()
+        assert task.cancelled()
+        assert strategy._active_tasks == {}
+
 
 # ============================================================================
 # Reset Watcher Async Paths (lines 1394-1408)
