@@ -14,13 +14,14 @@ class TestReservationContext:
 
     def test_creation_with_defaults(self):
         """Test creating a ReservationContext with default created_at."""
-        before = time.time()
+        # created_at is a monotonic timestamp (immune to wall-clock steps).
+        before = time.monotonic()
         ctx = ReservationContext(
             reservation_id="res-123",
             bucket_id="bucket-abc",
             estimated_tokens=100,
         )
-        after = time.time()
+        after = time.monotonic()
 
         assert ctx.reservation_id == "res-123"
         assert ctx.bucket_id == "bucket-abc"
@@ -219,7 +220,7 @@ class TestReservationTracker:
         )
 
         # Add reservations with old timestamps by manipulating created_at directly
-        old_time = time.time() - 2  # 2 seconds ago (older than max_age)
+        old_time = time.monotonic() - 2  # 2 seconds ago (older than max_age)
         for i in range(10):
             await tracker.store(f"req-{i}", "bucket", f"res-{i}", 10)
             # Manually set the created_at to be stale
@@ -246,7 +247,7 @@ class TestReservationTracker:
 
         # Add a stale reservation and manually set its created_at
         await tracker.store("req-old", "bucket", "res-old", 50)
-        old_time = time.time() - 3  # 3 seconds ago
+        old_time = time.monotonic() - 3  # 3 seconds ago
         tracker._reservation_contexts[("req-old", "bucket")].created_at = old_time
 
         # Add a fresh reservation
@@ -305,7 +306,7 @@ class TestReservationTracker:
 
         # Add a stale reservation and manually set its created_at
         await tracker.store("req-old", "bucket", "res-old", 50)
-        old_time = time.time() - 2
+        old_time = time.monotonic() - 2
         tracker._reservation_contexts[("req-old", "bucket")].created_at = old_time
 
         # Rebuild heap after modifying timestamps (required for heap-based cleanup)
@@ -415,7 +416,7 @@ class TestReservationTracker:
         await tracker.store("req-new", "bucket-a", "res-new", 100)
 
         # Make first two reservations stale
-        old_time = time.time() - 3  # 3 seconds ago
+        old_time = time.monotonic() - 3  # 3 seconds ago
         tracker._reservation_contexts[("req-old-1", "bucket-a")].created_at = old_time
         tracker._reservation_contexts[("req-old-2", "bucket-a")].created_at = old_time
 
@@ -425,7 +426,7 @@ class TestReservationTracker:
         assert tracker.reservation_count == 3
 
         # Get stale reservations with cutoff 2 seconds ago
-        cutoff = time.time() - 2
+        cutoff = time.monotonic() - 2
         stale_contexts = await tracker.get_and_clear_stale(cutoff)
 
         # Should return the 2 stale reservations
@@ -451,7 +452,7 @@ class TestReservationTracker:
         await tracker.store("req-2", "bucket-a", "res-2", 75)
 
         # Use cutoff in the past - no reservations should be stale
-        cutoff = time.time() - 1000  # 1000 seconds ago
+        cutoff = time.monotonic() - 1000  # 1000 seconds ago
         stale_contexts = await tracker.get_and_clear_stale(cutoff)
 
         assert stale_contexts == []
@@ -471,13 +472,13 @@ class TestReservationTracker:
         await tracker.store("req-1", "bucket-b", "res-1b", 75)
 
         # Make only one stale
-        old_time = time.time() - 3
+        old_time = time.monotonic() - 3
         tracker._reservation_contexts[("req-1", "bucket-a")].created_at = old_time
 
         # Rebuild heap after modifying timestamps (required for heap-based cleanup)
         tracker._rebuild_time_heap()
 
-        cutoff = time.time() - 2
+        cutoff = time.monotonic() - 2
         stale_contexts = await tracker.get_and_clear_stale(cutoff)
 
         assert len(stale_contexts) == 1
@@ -491,3 +492,29 @@ class TestReservationTracker:
         ctx = await tracker.get("req-1", "bucket-b")
         assert ctx is not None
         assert ctx.reservation_id == "res-1b"
+
+
+class TestReservationTrackerMonotonicStaleness:
+    """Staleness must be measured on a monotonic clock, immune to NTP steps."""
+
+    @pytest.mark.asyncio
+    async def test_stale_cleanup_ignores_wall_clock_jump(self):
+        """A forward wall-clock step (NTP correction) must not falsely
+        reclaim a freshly created, still-live reservation.
+
+        Regression: created_at and the cleanup cutoff both used time.time(),
+        so a wall-clock jump made every reservation look stale at once.
+        """
+        from unittest.mock import patch
+
+        tracker = ReservationTracker(max_reservation_age=100.0)
+        await tracker.store("req-1", "bucket-1", "res-1", 10)
+        assert tracker.reservation_count == 1
+
+        real_time = time.time
+        # NTP corrects the wall clock forward by an hour.
+        with patch("time.time", lambda: real_time() + 3600):
+            cleaned = await tracker._cleanup_stale()
+
+        assert cleaned == 0
+        assert tracker.reservation_count == 1

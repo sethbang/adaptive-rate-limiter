@@ -155,11 +155,11 @@ class IntelligentModeStrategy(BaseSchedulingModeStrategy):
         STALE_CLEANUP_INTERVAL: Interval in seconds between cleanup runs
     """
 
-    # Reservation tracking configuration (ClassVar allows test modification)
-    # CRITICAL: Must be < max_request_timeout (300s) to prevent double-release race
-    MAX_RESERVATION_AGE: ClassVar[int] = (
-        240  # 4 minutes - SHORTER than Redis orphan recovery (5 min)
-    )
+    # Reservation tracking configuration (ClassVar allows test modification).
+    # MAX_RESERVATION_AGE is the default *floor*: __init__ raises the
+    # effective age (self._max_reservation_age) above request_timeout so the
+    # stale-reservation cleanup never reclaims a still-running reservation.
+    MAX_RESERVATION_AGE: ClassVar[int] = 240  # 4 minutes (default floor)
     MAX_RESERVATIONS: ClassVar[int] = 10000  # Prevent unbounded memory growth
     STALE_CLEANUP_INTERVAL: ClassVar[int] = 60  # Run cleanup every minute
 
@@ -236,6 +236,15 @@ class IntelligentModeStrategy(BaseSchedulingModeStrategy):
         self.max_concurrent_requests = getattr(config, "max_concurrent_executions", 100)
         self._request_timeout = getattr(config, "request_timeout", 300.0)
 
+        # Effective stale-reservation age. A request can legitimately hold a
+        # reservation for up to request_timeout, and the cleanup only runs
+        # every STALE_CLEANUP_INTERVAL, so the age must exceed their sum or
+        # the cleanup would reclaim live, in-flight reservations.
+        self._max_reservation_age = max(
+            self.MAX_RESERVATION_AGE,
+            int(self._request_timeout) + self.STALE_CLEANUP_INTERVAL,
+        )
+
         # Activity tracking for diagnostics
         self._last_activity_time = time.time()
         self._idle_cycles = 0
@@ -261,7 +270,7 @@ class IntelligentModeStrategy(BaseSchedulingModeStrategy):
         # Reservation tracking via composition (delegates storage operations)
         self._reservation_tracker = ReservationTracker(
             max_reservations=self.MAX_RESERVATIONS,
-            max_reservation_age=self.MAX_RESERVATION_AGE,
+            max_reservation_age=self._max_reservation_age,
             stale_cleanup_interval=self.STALE_CLEANUP_INTERVAL,
         )
 
@@ -1399,7 +1408,7 @@ class IntelligentModeStrategy(BaseSchedulingModeStrategy):
 
     async def _cleanup_stale_reservations(self) -> int:
         """
-        Clean up reservations older than MAX_RESERVATION_AGE.
+        Clean up reservations older than the effective reservation age.
 
         This method handles backend release calls for stale reservations.
         The ReservationTracker provides storage operations via its
@@ -1408,14 +1417,17 @@ class IntelligentModeStrategy(BaseSchedulingModeStrategy):
         Returns:
             Number of reservations cleaned up.
         """
-        cutoff = time.time() - self.MAX_RESERVATION_AGE
+        # Monotonic clock: ReservationContext.created_at is monotonic, so the
+        # cutoff must be too. Wall-clock would make NTP steps reclaim live
+        # reservations en masse.
+        cutoff = time.monotonic() - self._max_reservation_age
 
         # Use encapsulated API to get and clear stale reservations
         stale_contexts = await self._reservation_tracker.get_and_clear_stale(cutoff)
 
         # Release OUTSIDE lock to avoid holding lock during backend calls
         for ctx in stale_contexts:
-            age = time.time() - ctx.created_at
+            age = time.monotonic() - ctx.created_at
             logger.warning(
                 f"Cleaned up stale reservation {ctx.reservation_id} "
                 f"(age: {age:.1f}s, bucket: {ctx.bucket_id})"

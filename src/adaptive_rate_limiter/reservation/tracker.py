@@ -311,7 +311,9 @@ class ReservationTracker:
         Returns:
             Number of stale reservations cleaned up
         """
-        now = time.time()
+        # Monotonic clock: ReservationContext.created_at is also monotonic,
+        # so staleness is immune to wall-clock/NTP adjustments.
+        now = time.monotonic()
         cutoff = now - self._max_reservation_age
         cleaned_count = 0
 

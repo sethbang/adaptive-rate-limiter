@@ -18,10 +18,12 @@ class ReservationContext:
         reservation_id: Unique identifier for this reservation
         bucket_id: The rate limit bucket this reservation is against
         estimated_tokens: The number of tokens reserved
-        created_at: Unix timestamp when the reservation was created
+        created_at: Monotonic timestamp (time.monotonic()) when the
+            reservation was created. Monotonic - not wall clock - so staleness
+            math is immune to NTP/system clock adjustments.
     """
 
     reservation_id: str
     bucket_id: str
     estimated_tokens: int
-    created_at: float = field(default_factory=time.time)
+    created_at: float = field(default_factory=time.monotonic)

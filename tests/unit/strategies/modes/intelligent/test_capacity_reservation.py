@@ -283,7 +283,7 @@ class TestIntelligentModeStrategyStaleReservationCleanup:
                 reservation_id="res-1",
                 bucket_id="bucket-1",
                 estimated_tokens=100,
-                created_at=time.time() - 1000,  # Very old
+                created_at=time.monotonic() - 1000,  # Very old
             )
         )
         strategy._reservation_tracker._request_id_index["req-1"] = {
