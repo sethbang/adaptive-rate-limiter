@@ -70,6 +70,12 @@ class TestRateLimiterConfig:
         assert config.test_mode is False
         assert config.test_rate_multiplier == 1.0
 
+        # Retry / batching / tracking knobs
+        assert config.max_retries == 3
+        assert config.batch_size == 50
+        assert config.stale_entry_ttl is None
+        assert config.max_tracking_entries is None
+
     def test_validation_rate_limit_buffer_ratio(self):
         """Test validation of rate_limit_buffer_ratio."""
         # Valid values
@@ -121,6 +127,44 @@ class TestRateLimiterConfig:
             RateLimiterConfig(max_queue_size=0)
         with pytest.raises(ValueError, match="max_queue_size"):
             RateLimiterConfig(max_queue_size=-1)
+
+    def test_validation_max_retries(self):
+        """Test validation of max_retries."""
+        RateLimiterConfig(max_retries=0)
+        RateLimiterConfig(max_retries=10)
+
+        with pytest.raises(ValueError, match="max_retries"):
+            RateLimiterConfig(max_retries=-1)
+
+    def test_validation_batch_size(self):
+        """Test validation of batch_size."""
+        RateLimiterConfig(batch_size=1)
+        RateLimiterConfig(batch_size=500)
+
+        with pytest.raises(ValueError, match="batch_size"):
+            RateLimiterConfig(batch_size=0)
+        with pytest.raises(ValueError, match="batch_size"):
+            RateLimiterConfig(batch_size=-1)
+
+    def test_validation_stale_entry_ttl(self):
+        """Test validation of stale_entry_ttl."""
+        RateLimiterConfig(stale_entry_ttl=None)
+        RateLimiterConfig(stale_entry_ttl=0.5)
+
+        with pytest.raises(ValueError, match="stale_entry_ttl"):
+            RateLimiterConfig(stale_entry_ttl=0)
+        with pytest.raises(ValueError, match="stale_entry_ttl"):
+            RateLimiterConfig(stale_entry_ttl=-1.0)
+
+    def test_validation_max_tracking_entries(self):
+        """Test validation of max_tracking_entries."""
+        RateLimiterConfig(max_tracking_entries=None)
+        RateLimiterConfig(max_tracking_entries=1)
+
+        with pytest.raises(ValueError, match="max_tracking_entries"):
+            RateLimiterConfig(max_tracking_entries=0)
+        with pytest.raises(ValueError, match="max_tracking_entries"):
+            RateLimiterConfig(max_tracking_entries=-5)
 
     def test_validation_overflow_policy(self):
         """Test validation of overflow_policy."""

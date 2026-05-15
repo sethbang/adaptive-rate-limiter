@@ -86,14 +86,27 @@ class Scheduler(BaseScheduler):
         """
         Submit request for execution.
 
-        This method delegates to the mode strategy.
+        This method delegates to the mode strategy. The return type is
+        **mode-dependent**:
+
+        - ``BASIC`` mode executes the request inline and returns the raw
+          API response (the value produced by ``request_func``).
+        - ``INTELLIGENT`` and ``ACCOUNT`` modes enqueue the request and
+          return a :class:`~adaptive_rate_limiter.ScheduleResult`. The
+          request runs asynchronously on the scheduler loop; await
+          ``result.request.future`` to obtain the API response.
+
+        Both ``ScheduleResult`` and ``QueuedRequest`` are exported from the
+        top-level ``adaptive_rate_limiter`` package.
 
         Args:
             metadata: Request metadata
             request_func: Async function to execute the request
 
         Returns:
-            Result from the mode strategy
+            In BASIC mode, the raw API response. In INTELLIGENT/ACCOUNT
+            mode, a ``ScheduleResult`` whose ``request.future`` resolves
+            with the API response.
         """
         logger.debug(
             f"Scheduler.submit_request called! Mode: {self.config.mode}, Model: {metadata.model_id}"

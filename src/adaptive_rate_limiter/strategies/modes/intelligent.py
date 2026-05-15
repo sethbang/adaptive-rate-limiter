@@ -870,22 +870,44 @@ class IntelligentModeStrategy(BaseSchedulingModeStrategy):
 
         # Remove request from queue
         request_to_process = queue.popleft()
-
-        # Update metadata for safe priority tracking
         queue_info = self.queue_info.get(queue_key)
-        if queue_info:
-            await queue_info.update_on_dequeue()
-
-        # Create tracked task with proper resource management
         task_id = f"{queue_key}:{request_to_process.metadata.request_id}"
-        task = asyncio.create_task(
-            self._execute_request_with_tracking(request_to_process, task_id, bucket_id)
-        )
+        task: asyncio.Task[Any] | None = None
 
-        # Track the task
-        async with self._task_lock:
-            self._active_tasks[task_id] = task
-            self._active_request_count += 1
+        try:
+            # Update metadata for safe priority tracking
+            if queue_info:
+                await queue_info.update_on_dequeue()
+
+            # Create tracked task with proper resource management
+            task = asyncio.create_task(
+                self._execute_request_with_tracking(
+                    request_to_process, task_id, bucket_id
+                )
+            )
+
+            # Track the task
+            async with self._task_lock:
+                self._active_tasks[task_id] = task
+                self._active_request_count += 1
+        except asyncio.CancelledError:
+            # Cancelled between a successful capacity reservation and the
+            # executor task taking ownership of it. Release the orphaned
+            # reservation so capacity is not held until stale cleanup runs.
+            # If the task was already created it owns the reservation and
+            # will release it itself via _execute_request_with_tracking.
+            if task is None:
+                with contextlib.suppress(Exception):
+                    await asyncio.shield(
+                        self._update_rate_limit_state(
+                            request_to_process.metadata,
+                            None,
+                            status_code=None,
+                            bucket_id_override=bucket_id,
+                            clear_all_reservations=True,
+                        )
+                    )
+            raise
 
         return True
 
