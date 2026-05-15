@@ -133,8 +133,11 @@ class RateLimitResetWatcher:
 
         earliest_reset = None
 
-        # Check all buckets being tracked
-        for bucket_id in self._buckets_waiting:
+        # Check all buckets being tracked. Iterate a snapshot: get_state()
+        # awaits, and a reset watcher firing concurrently mutates
+        # _buckets_waiting, which would raise "Set changed size during
+        # iteration" if we iterated the live set.
+        for bucket_id in list(self._buckets_waiting):
             state = await self._state_manager.get_state(bucket_id)
             if state and state.reset_at:
                 reset_ts = state.reset_at.timestamp()

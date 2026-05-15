@@ -85,6 +85,59 @@ jobs:
       - name: Run pip-audit on runtime dependencies
         run: uv run pip-audit --no-deps --disable-pip -r runtime-requirements.txt
 
+  package:
+    name: Build & verify wheel
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v6
+
+      - name: Set up Python
+        uses: actions/setup-python@v6
+        with:
+          python-version: ${{ env.PYTHON_VERSION_DEFAULT }}
+
+      - name: Install uv
+        uses: astral-sh/setup-uv@v8.1.0
+
+      - name: Build wheel
+        run: uv build --wheel
+
+      - name: Verify Lua scripts are packaged in the wheel
+        # A packaging regression that drops the Lua data files would
+        # otherwise ship to PyPI undetected.
+        run: |
+          WHEEL=$(ls dist/*.whl)
+          echo "Inspecting $WHEEL"
+          LUA_COUNT=$(unzip -l "$WHEEL" | grep -c '\.lua$' || true)
+          echo "Lua files in wheel: $LUA_COUNT"
+          if [ "$LUA_COUNT" -ne 6 ]; then
+            echo "::error::Expected 6 Lua scripts in the wheel, found $LUA_COUNT"
+            exit 1
+          fi
+
+      - name: Install the built wheel into a clean environment
+        run: |
+          python -m venv /tmp/wheeltest
+          /tmp/wheeltest/bin/pip install --upgrade pip
+          /tmp/wheeltest/bin/pip install "$(ls dist/*.whl)[redis]"
+
+      - name: Smoke-test the installed wheel
+        run: |
+          /tmp/wheeltest/bin/python - <<'PY'
+          from importlib.resources import files
+
+          import adaptive_rate_limiter as arl
+          from adaptive_rate_limiter.backends import RedisBackend  # noqa: F401
+
+          lua_dir = files("adaptive_rate_limiter.backends") / "lua"
+          scripts = sorted(
+              p.name for p in lua_dir.iterdir() if p.name.endswith(".lua")
+          )
+          assert len(scripts) == 6, scripts
+          print("version:", arl.__version__)
+          print("lua scripts:", scripts)
+          PY
+
   test:
     name: Test (Python ${{ matrix.python-version }}, ${{ matrix.os }})
     runs-on: ${{ matrix.os }}
@@ -106,7 +159,7 @@ jobs:
         uses: astral-sh/setup-uv@v8.1.0
 
       - name: Install dependencies
-        run: uv sync --extra dev
+        run: uv sync --extra dev --extra redis
 
       - name: Run unit tests only (Windows)
         if: runner.os == 'Windows'

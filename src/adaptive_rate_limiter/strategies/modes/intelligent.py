@@ -361,26 +361,34 @@ class IntelligentModeStrategy(BaseSchedulingModeStrategy):
         queue = self.fast_queues[queue_key]
         queue_info = self.queue_info.get(queue_key)
 
-        if await self._check_queue_overflow(len(queue), queue_key) and (
-            getattr(self.config, "overflow_policy", "reject") == "drop_oldest" and queue
-        ):
-            dropped_request = queue.popleft()
-            # Update metadata for dropped request
+        # All queue + _queue_has_items mutation happens under the per-queue
+        # lock so it serializes with the scheduler loop's drain. Otherwise an
+        # append racing with the loop clearing the flag loses the update and
+        # starves a non-empty queue.
+        async with self._queue_locks[queue_key]:
+            if await self._check_queue_overflow(len(queue), queue_key) and (
+                getattr(self.config, "overflow_policy", "reject") == "drop_oldest"
+                and queue
+            ):
+                dropped_request = queue.popleft()
+                # Update metadata for dropped request
+                if queue_info:
+                    await queue_info.update_on_dequeue()
+                # Guard with done(): a future already resolved (result or
+                # exception) or cancelled cannot accept set_exception.
+                if not dropped_request.future.done():
+                    dropped_request.future.set_exception(
+                        RateLimiterError("Request dropped due to queue overflow")
+                    )
+
+            # Add to queue
+            queue.append(queued_request)
+            self._queue_has_items[queue_key] = True
+
+            # Update metadata for safe priority tracking
             if queue_info:
-                await queue_info.update_on_dequeue()
-            if not dropped_request.future.cancelled():
-                dropped_request.future.set_exception(
-                    RateLimiterError("Request dropped due to queue overflow")
-                )
-
-        # Add to queue
-        queue.append(queued_request)
-        self._queue_has_items[queue_key] = True
-
-        # Update metadata for safe priority tracking
-        if queue_info:
-            priority = float(metadata.priority)
-            await queue_info.update_on_enqueue(priority)
+                priority = float(metadata.priority)
+                await queue_info.update_on_enqueue(priority)
 
         # Signal scheduler loop (fire-and-forget with exception handling)
         task = asyncio.create_task(self._safe_set_wakeup_event())
@@ -408,7 +416,11 @@ class IntelligentModeStrategy(BaseSchedulingModeStrategy):
             except asyncio.CancelledError:
                 logger.info("Intelligent scheduler loop cancelled")
                 break
-            except (AttributeError, ValueError, OSError, TypeError) as e:
+            except Exception as e:
+                # Catch broadly: any unhandled exception here would otherwise
+                # escape the loop and permanently kill the scheduler. The loop
+                # must keep running and process subsequent requests.
+                # (CancelledError is a BaseException and is handled above.)
                 logger.exception(f"Intelligent scheduler error: {e}")
                 await asyncio.sleep(0.01)
 

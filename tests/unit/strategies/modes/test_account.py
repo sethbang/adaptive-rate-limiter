@@ -11,6 +11,7 @@ from unittest.mock import AsyncMock, Mock
 import pytest
 
 from adaptive_rate_limiter.exceptions import QueueOverflowError
+from adaptive_rate_limiter.scheduler.config import RateLimiterConfig, SchedulerMode
 from adaptive_rate_limiter.strategies.modes.account import (
     METRIC_CURRENT_QUEUE_SIZE,
     METRIC_TOTAL_COMPLETED,
@@ -36,7 +37,7 @@ class TestAccountModeStrategyInit:
     def mock_config(self):
         """Create a mock configuration."""
         config = Mock()
-        config.max_concurrent_requests = 10
+        config.max_concurrent_executions = 10
         config.conservative_multiplier = 0.9
         config.scheduler_interval = 0.01
         config.max_queue_size = 1000
@@ -68,6 +69,22 @@ class TestAccountModeStrategyInit:
     def test_init_max_concurrent_requests(self, strategy):
         """Verify max_concurrent_requests from config."""
         assert strategy.max_concurrent_requests == 10
+
+    def test_init_reads_max_concurrent_executions_from_real_config(
+        self, mock_scheduler, mock_client
+    ):
+        """ACCOUNT mode must honour the real config field name.
+
+        Regression: the strategy read getattr(config,
+        "max_concurrent_requests", 10) but RateLimiterConfig exposes the
+        field as ``max_concurrent_executions``, so a configured limit was
+        silently ignored and the hardcoded default (10) used instead.
+        """
+        config = RateLimiterConfig(
+            mode=SchedulerMode.ACCOUNT, max_concurrent_executions=7
+        )
+        strategy = AccountModeStrategy(mock_scheduler, config, mock_client)
+        assert strategy.max_concurrent_requests == 7
 
     def test_init_conservative_multiplier(self, strategy):
         """Verify conservative_multiplier from config."""
@@ -108,7 +125,7 @@ class TestAccountModeStrategySubmitRequest:
     def mock_config(self):
         """Create a mock configuration."""
         config = Mock()
-        config.max_concurrent_requests = 10
+        config.max_concurrent_executions = 10
         config.conservative_multiplier = 0.9
         config.scheduler_interval = 0.01
         config.max_queue_size = 100
@@ -220,7 +237,7 @@ class TestAccountModeStrategySchedulingLoop:
     def mock_config(self):
         """Create a mock configuration."""
         config = Mock()
-        config.max_concurrent_requests = 2
+        config.max_concurrent_executions = 2
         config.conservative_multiplier = 0.9
         config.scheduler_interval = 0.001  # Fast interval for tests
         config.max_queue_size = 100
@@ -294,7 +311,7 @@ class TestAccountModeStrategyExecution:
     def mock_config(self):
         """Create a mock configuration."""
         config = Mock()
-        config.max_concurrent_requests = 10
+        config.max_concurrent_executions = 10
         config.conservative_multiplier = 0.9
         config.scheduler_interval = 0.001
         config.max_queue_size = 100
@@ -420,10 +437,14 @@ class TestAccountModeStrategyLifecycle:
         mock_scheduler = Mock()
         mock_scheduler.circuit_breaker = None
         mock_config = Mock()
-        mock_config.max_concurrent_requests = 10
+        mock_config.max_concurrent_executions = 10
         mock_config.conservative_multiplier = 0.9
         mock_config.scheduler_interval = 0.01
         mock_config.max_queue_size = 100
+        # request_timeout must be a real number: the scheduling loop passes it
+        # to asyncio.wait_for(), which compares it against 0. A Mock here makes
+        # the spawned execution task die with an unawaited TypeError.
+        mock_config.request_timeout = 1.0
         return AccountModeStrategy(mock_scheduler, mock_config, Mock())
 
     @pytest.mark.asyncio
@@ -484,10 +505,14 @@ class TestAccountModeStrategyMetrics:
         mock_scheduler = Mock()
         mock_scheduler.circuit_breaker = None
         mock_config = Mock()
-        mock_config.max_concurrent_requests = 10
+        mock_config.max_concurrent_executions = 10
         mock_config.conservative_multiplier = 0.9
         mock_config.scheduler_interval = 0.01
         mock_config.max_queue_size = 100
+        # request_timeout must be a real number: the scheduling loop passes it
+        # to asyncio.wait_for(), which compares it against 0. A Mock here makes
+        # the spawned execution task die with an unawaited TypeError.
+        mock_config.request_timeout = 1.0
         return AccountModeStrategy(mock_scheduler, mock_config, Mock())
 
     def test_get_metrics_includes_mode(self, strategy):
