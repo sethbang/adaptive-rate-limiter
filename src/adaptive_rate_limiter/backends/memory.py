@@ -71,6 +71,14 @@ class MemoryBackend(BaseBackend):
         # In-memory storage with TTL tracking
         # Format: Dict[key, Tuple[value, Optional[expiry_timestamp]]]
         self._states: dict[str, tuple[dict[str, Any], float | None]] = {}
+
+        # Per-key state version. Incremented every time update_rate_limits
+        # wholesale-replaces a key's state from server headers. A streaming
+        # reservation records the version at reserve time; if the version
+        # has advanced by release time, the header sync already superseded
+        # the reservation's token debit, so the refund must be skipped to
+        # avoid crediting capacity the server never debited.
+        self._state_versions: dict[str, int] = defaultdict(int)
         self._rate_limits: dict[str, tuple[dict[str, Any], float | None]] = {}
         self._reservations: dict[str, tuple[dict[str, Any], float | None]] = {}
         self._bucket_cache: tuple[dict[str, Any], float] | None = None
@@ -258,6 +266,7 @@ class MemoryBackend(BaseBackend):
         """Clear all stored states."""
         async with self._lock:
             self._states.clear()
+            self._state_versions.clear()
             logger.debug("Cleared all states")
 
     # Capacity Management
@@ -316,6 +325,7 @@ class MemoryBackend(BaseBackend):
                             "tokens": tokens,
                             "bucket_limits": bucket_limits,
                             "safety_margin": safety_margin,
+                            "state_version": self._state_versions[key],
                         },
                         expiry,
                     )
@@ -471,6 +481,7 @@ class MemoryBackend(BaseBackend):
                     "tokens": tokens,
                     "bucket_limits": bucket_limits,
                     "safety_margin": safety_margin,
+                    "state_version": self._state_versions[key],
                 },
                 reservation_expiry,
             )
@@ -556,12 +567,37 @@ class MemoryBackend(BaseBackend):
                 del self._states[bucket_id]
                 return False
 
-            refund = reserved_tokens - actual_tokens
-            current = state_data.get("remaining_tokens", 0)
-            limit = state_data.get("token_limit", float("inf"))
+            # Reconcile against the header-sync path. The refund only makes
+            # sense if the reservation's token debit is still reflected in
+            # the current remaining_tokens. If update_rate_limits replaced
+            # the state from server headers after this reservation was
+            # created, the server value is authoritative and already
+            # accounts for actual usage; adding the refund on top would
+            # credit capacity the server never debited (over-admission).
+            reservation_record = self._reservations.get(reservation_id)
+            refund_is_safe = True
+            if reservation_record is not None:
+                reservation_data, _ = reservation_record
+                reserved_version = reservation_data.get("state_version")
+                if (
+                    reserved_version is not None
+                    and reserved_version != self._state_versions[bucket_id]
+                ):
+                    # A header sync superseded this reservation's debit.
+                    refund_is_safe = False
 
-            # Apply refund
-            state_data["remaining_tokens"] = max(0, min(current + refund, limit))
+            if refund_is_safe:
+                refund = reserved_tokens - actual_tokens
+                current = state_data.get("remaining_tokens", 0)
+                limit = state_data.get("token_limit", float("inf"))
+                state_data["remaining_tokens"] = max(0, min(current + refund, limit))
+            else:
+                logger.debug(
+                    "Skipping streaming refund for reservation %s on %s: "
+                    "header sync superseded the reservation",
+                    reservation_id,
+                    bucket_id,
+                )
 
             # Mark as released
             self._released_reservations[bucket_id].add(reservation_id)
@@ -751,6 +787,11 @@ class MemoryBackend(BaseBackend):
             if expiry is not None:
                 self._track_expiry("states", key, expiry)
 
+            # Header sync wholesale-replaced this key's state. Bump the
+            # version so any in-flight streaming reservation created against
+            # the prior state knows its token debit has been superseded.
+            self._state_versions[key] += 1
+
         return 1
 
     async def get_rate_limits(self, model: str) -> dict[str, Any]:
@@ -885,6 +926,7 @@ class MemoryBackend(BaseBackend):
         """Clean up backend resources."""
         async with self._lock:
             self._states.clear()
+            self._state_versions.clear()
             self._rate_limits.clear()
             self._reservations.clear()
             self._failures.clear()
