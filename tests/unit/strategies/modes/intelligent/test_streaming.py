@@ -174,8 +174,8 @@ class TestIntelligentModeStrategyStaleStreamingCleanup:
             reservation_id="res-1",
             bucket_id="bucket-1",
             reserved_tokens=1000,
-            started_at=time.time() - 1000,
-            last_activity_at=time.time() - 1000,
+            started_at=time.monotonic() - 1000,
+            last_activity_at=time.monotonic() - 1000,
             wrapper_ref=ref,
         )
 
@@ -208,8 +208,8 @@ class TestIntelligentModeStrategyStaleStreamingCleanup:
             reservation_id="res-2",
             bucket_id="bucket-1",
             reserved_tokens=1000,
-            started_at=time.time() - 1000,
-            last_activity_at=time.time() - 1000,  # Very old
+            started_at=time.monotonic() - 1000,
+            last_activity_at=time.monotonic() - 1000,  # Very old
             wrapper_ref=weakref.ref(wrapper),
         )
 
@@ -225,6 +225,49 @@ class TestIntelligentModeStrategyStaleStreamingCleanup:
         )
 
         assert cleaned == 1
+
+    @pytest.mark.asyncio
+    async def test_cleanup_stale_streaming_immune_to_wall_clock_jump(
+        self, strategy, mock_backend
+    ):
+        """Streaming staleness uses a monotonic clock, so a forward
+        wall-clock (NTP) step must not falsely reclaim a fresh, live stream.
+
+        Regression: started_at / last_activity_at used time.time(), so a
+        clock jump could mass-reclaim live streams or (on a backward step)
+        leave abandoned streams holding capacity indefinitely.
+        """
+        from unittest.mock import patch
+
+        from adaptive_rate_limiter.streaming.tracker import StreamingInFlightEntry
+
+        class FakeWrapper:
+            pass
+
+        wrapper = FakeWrapper()
+        manager = strategy._streaming_cleanup_manager
+        manager._activity_timeout = 300.0
+
+        # A stream that just started (fresh monotonic activity).
+        now = time.monotonic()
+        manager._streaming_in_flight["res-fresh"] = StreamingInFlightEntry(
+            reservation_id="res-fresh",
+            bucket_id="bucket-1",
+            reserved_tokens=1000,
+            started_at=now,
+            last_activity_at=now,
+            wrapper_ref=weakref.ref(wrapper),
+        )
+
+        # NTP corrects the wall clock forward by an hour mid-stream.
+        real_time = time.time
+        with patch("time.time", lambda: real_time() + 3600):
+            cleaned = await manager._cleanup_stale()
+
+        # The live stream must NOT be reclaimed.
+        assert cleaned == 0
+        assert "res-fresh" in manager._streaming_in_flight
+        mock_backend.release_streaming_reservation.assert_not_called()
 
 
 # ============================================================================
@@ -244,7 +287,7 @@ class TestIntelligentModeStrategyStreamingWrapping:
             reservation_id="res-1",
             bucket_id="bucket-1",
             estimated_tokens=100,
-            created_at=time.time(),
+            created_at=time.monotonic(),
         )
         metadata = RequestMetadata(
             request_id="req-1",
@@ -279,7 +322,7 @@ class TestIntelligentModeStrategyStreamingWrapping:
             reservation_id="res-2",
             bucket_id="bucket-1",
             estimated_tokens=100,
-            created_at=time.time(),
+            created_at=time.monotonic(),
         )
         metadata = RequestMetadata(
             request_id="req-2",
@@ -303,6 +346,87 @@ class TestIntelligentModeStrategyStreamingWrapping:
         assert isinstance(wrapped, RateLimitedAsyncIterator)
 
     @pytest.mark.asyncio
+    async def test_wrap_streaming_iterator_class_hands_off_reservation(self, strategy):
+        """After wrapping a Stream class, the reservation must be removed
+        from the reservation tracker.
+
+        Regression: streaming reservations stayed in _reservation_tracker
+        after the iterator took ownership, so the stale-reservation cleanup
+        would reclaim a live, still-iterating stream's capacity.
+        """
+        await strategy._reservation_tracker.store(
+            request_id="req-handoff-1",
+            bucket_id="bucket-1",
+            reservation_id="res-handoff-1",
+            estimated_tokens=100,
+        )
+        assert (
+            await strategy._reservation_tracker.get("req-handoff-1", "bucket-1")
+            is not None
+        )
+
+        reservation = await strategy._reservation_tracker.get(
+            "req-handoff-1", "bucket-1"
+        )
+        metadata = RequestMetadata(
+            request_id="req-handoff-1",
+            model_id="test",
+            resource_type="chat",
+        )
+
+        async def gen():
+            yield "chunk"
+
+        stream_result = Mock()
+        stream_result._iterator = gen()
+
+        with patch.object(
+            strategy._streaming_cleanup_manager, "register", new_callable=AsyncMock
+        ):
+            await strategy._streaming_handler.wrap_streaming_response(
+                stream_result, reservation, metadata
+            )
+
+        # The iterator + StreamingCleanupManager now own the reservation;
+        # it must no longer be in the stale-reservation tracker.
+        assert (
+            await strategy._reservation_tracker.get("req-handoff-1", "bucket-1") is None
+        )
+
+    @pytest.mark.asyncio
+    async def test_wrap_streaming_async_iterable_hands_off_reservation(self, strategy):
+        """After wrapping an async iterable, the reservation must be removed
+        from the reservation tracker (iterator owns it)."""
+        await strategy._reservation_tracker.store(
+            request_id="req-handoff-2",
+            bucket_id="bucket-1",
+            reservation_id="res-handoff-2",
+            estimated_tokens=100,
+        )
+        reservation = await strategy._reservation_tracker.get(
+            "req-handoff-2", "bucket-1"
+        )
+        metadata = RequestMetadata(
+            request_id="req-handoff-2",
+            model_id="test",
+            resource_type="chat",
+        )
+
+        async def gen():
+            yield "chunk"
+
+        with patch.object(
+            strategy._streaming_cleanup_manager, "register", new_callable=AsyncMock
+        ):
+            await strategy._streaming_handler.wrap_streaming_response(
+                gen(), reservation, metadata
+            )
+
+        assert (
+            await strategy._reservation_tracker.get("req-handoff-2", "bucket-1") is None
+        )
+
+    @pytest.mark.asyncio
     async def test_wrap_streaming_unknown_type_releases_immediately(
         self, strategy, mock_backend
     ):
@@ -311,7 +435,7 @@ class TestIntelligentModeStrategyStreamingWrapping:
             reservation_id="res-3",
             bucket_id="bucket-1",
             estimated_tokens=100,
-            created_at=time.time(),
+            created_at=time.monotonic(),
         )
         metadata = RequestMetadata(
             request_id="req-3",
@@ -361,8 +485,8 @@ class TestIntelligentModeStrategyStreamingCleanupEdgeCases:
             reservation_id="res-released",
             bucket_id="bucket-1",
             reserved_tokens=1000,
-            started_at=time.time(),
-            last_activity_at=time.time(),
+            started_at=time.monotonic(),
+            last_activity_at=time.monotonic(),
             wrapper_ref=weakref.ref(wrapper),
         )
 
@@ -398,15 +522,15 @@ class TestIntelligentModeStrategyStreamingCleanupEdgeCases:
 
             def __init__(self):
                 self._ctx = Mock()
-                self._ctx.last_chunk_at = time.time()  # Recent activity
+                self._ctx.last_chunk_at = time.monotonic()  # Recent activity
 
         wrapper = FakeWrapper()
         entry = StreamingInFlightEntry(
             reservation_id="res-active",
             bucket_id="bucket-1",
             reserved_tokens=1000,
-            started_at=time.time() - 1000,
-            last_activity_at=time.time() - 1000,  # Old
+            started_at=time.monotonic() - 1000,
+            last_activity_at=time.monotonic() - 1000,  # Old
             wrapper_ref=weakref.ref(wrapper),
         )
 
@@ -494,7 +618,7 @@ class TestIntelligentModeStrategyStreamingWrappingFailures:
             reservation_id="res-unknown",
             bucket_id="bucket-1",
             estimated_tokens=100,
-            created_at=time.time(),
+            created_at=time.monotonic(),
         )
         metadata = RequestMetadata(
             request_id="req-unknown",
@@ -538,8 +662,8 @@ class TestIntelligentModeStrategyStreamingCleanupLogging:
             reservation_id="res-log",
             bucket_id="bucket-1",
             reserved_tokens=1000,
-            started_at=time.time() - 1000,
-            last_activity_at=time.time() - 1000,
+            started_at=time.monotonic() - 1000,
+            last_activity_at=time.monotonic() - 1000,
             wrapper_ref=weakref.ref(wrapper),
         )
         strategy._streaming_cleanup_manager._streaming_in_flight["res-log"] = entry
@@ -583,8 +707,8 @@ class TestIntelligentModeStrategyStaleStreamingCancelledError:
             reservation_id="res-cancel",
             bucket_id="bucket-1",
             reserved_tokens=1000,
-            started_at=time.time() - 1000,
-            last_activity_at=time.time() - 1000,
+            started_at=time.monotonic() - 1000,
+            last_activity_at=time.monotonic() - 1000,
             wrapper_ref=weakref.ref(wrapper),
         )
         strategy._streaming_cleanup_manager._streaming_in_flight["res-cancel"] = entry
@@ -705,7 +829,7 @@ class TestIntelligentModeStrategyStreamingMetricsRecording:
             reservation_id="res-metrics",
             bucket_id="bucket-1",
             estimated_tokens=100,
-            created_at=time.time(),
+            created_at=time.monotonic(),
         )
         metadata = RequestMetadata(
             request_id="req-metrics",
@@ -748,7 +872,7 @@ class TestIntelligentModeStrategyStreamingMetricsRecording:
             reservation_id="res-err-cb",
             bucket_id="bucket-1",
             estimated_tokens=100,
-            created_at=time.time(),
+            created_at=time.monotonic(),
         )
         metadata = RequestMetadata(
             request_id="req-err-cb",

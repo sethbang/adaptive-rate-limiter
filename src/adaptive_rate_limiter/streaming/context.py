@@ -36,14 +36,18 @@ class StreamingReservationContext:
         request_id: The original request ID
         reserved_tokens: Number of tokens reserved at request start
         backend: Reference to the rate limit backend for release
-        created_at: Timestamp when the reservation was created
+        created_at: Monotonic timestamp (time.monotonic()) when the
+            reservation was created
         metrics_callback: Optional callback to record completion metrics
         error_metrics_callback: Optional callback to record error metrics
 
     Runtime tracking attributes:
         final_tokens: Actual token count extracted from stream completion
         chunk_count: Number of chunks received
-        last_chunk_at: Timestamp of the last chunk received
+        last_chunk_at: Monotonic timestamp of the last chunk received
+
+    All timestamps use ``time.monotonic()`` so stream staleness/abandonment
+    detection is immune to wall-clock (NTP) adjustments.
     """
 
     reservation_id: str
@@ -51,7 +55,7 @@ class StreamingReservationContext:
     request_id: str
     reserved_tokens: int
     backend: BaseBackend
-    created_at: float = field(default_factory=time.time)
+    created_at: float = field(default_factory=time.monotonic)
 
     # Runtime tracking - these are updated as the stream progresses
     final_tokens: int | None = field(default=None, repr=False)
@@ -74,7 +78,7 @@ class StreamingReservationContext:
         the activity timestamp. The background cleanup task uses this
         to detect hung streams.
         """
-        self.last_chunk_at = time.time()
+        self.last_chunk_at = time.monotonic()
         self.chunk_count += 1
 
     def set_final_tokens(self, tokens: int) -> None:
@@ -115,7 +119,7 @@ class StreamingReservationContext:
         """
         if self.chunk_count == 0:
             return None
-        return time.time() - self.created_at
+        return time.monotonic() - self.created_at
 
 
 __all__ = ["StreamingReservationContext"]

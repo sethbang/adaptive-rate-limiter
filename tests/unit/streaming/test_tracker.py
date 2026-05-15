@@ -43,7 +43,7 @@ class TestStreamingInFlightEntry:
     def test_init_with_all_fields(self) -> None:
         """Verify initialization with all required fields."""
         wrapper = Mock()
-        now = time.time()
+        now = time.monotonic()
 
         entry = StreamingInFlightEntry(
             reservation_id="res-1",
@@ -64,7 +64,7 @@ class TestStreamingInFlightEntry:
     def test_wrapper_ref_is_weak_reference(self) -> None:
         """Verify wrapper_ref is a weak reference."""
         wrapper = Mock()
-        now = time.time()
+        now = time.monotonic()
 
         entry = StreamingInFlightEntry(
             reservation_id="res-1",
@@ -317,11 +317,11 @@ class TestStreamingInFlightTrackerRegister:
     ) -> None:
         """Verify timestamps are set on register."""
         wrapper = Mock()
-        before = time.time()
+        before = time.monotonic()
 
         await tracker.register("res-1", "bucket-1", 1000, wrapper)
 
-        after = time.time()
+        after = time.monotonic()
         entry = tracker._streaming_in_flight["res-1"]
 
         assert before <= entry.started_at <= after
@@ -609,7 +609,7 @@ class TestStreamingInFlightTrackerCleanupStale:
         wrapper = Mock()
         wrapper._released = False
         wrapper._ctx = Mock()
-        wrapper._ctx.last_chunk_at = time.time() + 1  # Future time
+        wrapper._ctx.last_chunk_at = time.monotonic() + 1  # Future time
 
         await tracker.register("res-1", "bucket-1", 1000, wrapper)
 

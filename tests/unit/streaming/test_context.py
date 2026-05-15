@@ -42,7 +42,7 @@ class TestStreamingReservationContextInit:
     def test_init_sets_default_created_at(self) -> None:
         """Verify created_at is set to current time by default."""
         backend = Mock()
-        before = time.time()
+        before = time.monotonic()
         ctx = StreamingReservationContext(
             reservation_id="res-1",
             bucket_id="bucket-1",
@@ -50,7 +50,7 @@ class TestStreamingReservationContextInit:
             reserved_tokens=1000,
             backend=backend,
         )
-        after = time.time()
+        after = time.monotonic()
 
         assert before <= ctx.created_at <= after
 
@@ -154,9 +154,9 @@ class TestStreamingReservationContextRecordChunk:
         """Verify record_chunk() updates last_chunk_at."""
         assert context.last_chunk_at is None
 
-        before = time.time()
+        before = time.monotonic()
         context.record_chunk()
-        after = time.time()
+        after = time.monotonic()
 
         assert context.last_chunk_at is not None
         assert before <= context.last_chunk_at <= after
@@ -374,7 +374,7 @@ class TestStreamingReservationContextDurationSeconds:
         """Verify duration is calculated from created_at."""
         backend = Mock()
         # Set created_at to 1 second ago
-        created_at = time.time() - 1.0
+        created_at = time.monotonic() - 1.0
         ctx = StreamingReservationContext(
             reservation_id="res-1",
             bucket_id="bucket-1",

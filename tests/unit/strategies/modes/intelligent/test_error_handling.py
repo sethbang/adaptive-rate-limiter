@@ -246,8 +246,8 @@ class TestIntelligentModeStrategyStaleCleanupExceptions:
             reservation_id="res-stale",
             bucket_id="bucket-1",
             reserved_tokens=1000,
-            started_at=time.time() - 1000,
-            last_activity_at=time.time() - 1000,
+            started_at=time.monotonic() - 1000,
+            last_activity_at=time.monotonic() - 1000,
             wrapper_ref=weakref.ref(wrapper),
         )
 
