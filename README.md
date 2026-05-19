@@ -437,10 +437,14 @@ This library follows [Semantic Versioning 2.0.0](https://semver.org/).
 
 ### Public API
 
-The public API consists of all symbols exported from:
+The public API consists of all non-underscore symbols exported from these `__init__.py` files:
 - [`adaptive_rate_limiter/__init__.py`](src/adaptive_rate_limiter/__init__.py) (main package exports)
 - [`adaptive_rate_limiter/scheduler/__init__.py`](src/adaptive_rate_limiter/scheduler/__init__.py) (scheduler submodule)
 - [`adaptive_rate_limiter/backends/__init__.py`](src/adaptive_rate_limiter/backends/__init__.py) (backends submodule)
+- [`adaptive_rate_limiter/observability/__init__.py`](src/adaptive_rate_limiter/observability/__init__.py) (metrics and monitoring)
+- [`adaptive_rate_limiter/streaming/__init__.py`](src/adaptive_rate_limiter/streaming/__init__.py) (streaming token accounting)
+- [`adaptive_rate_limiter/reservation/__init__.py`](src/adaptive_rate_limiter/reservation/__init__.py) (reservation tracking)
+- [`adaptive_rate_limiter/providers/__init__.py`](src/adaptive_rate_limiter/providers/__init__.py) (provider interface)
 
 These exports are documented in the [API Reference](#api-reference) section above.
 

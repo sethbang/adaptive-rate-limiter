@@ -44,7 +44,7 @@ The library is a provider-agnostic rate-limiting scheduler for AI/ML APIs. The s
 
 This is enforced, not advisory:
 
-- Public exports come from three `__init__.py` files only: `adaptive_rate_limiter/`, `adaptive_rate_limiter/scheduler/`, `adaptive_rate_limiter/backends/`.
+- Public exports come from seven `__init__.py` files: `adaptive_rate_limiter/`, `adaptive_rate_limiter/scheduler/`, `adaptive_rate_limiter/backends/`, `adaptive_rate_limiter/observability/`, `adaptive_rate_limiter/streaming/`, `adaptive_rate_limiter/reservation/`, `adaptive_rate_limiter/providers/`. Any non-underscore symbol exported from these files is part of the public API.
 - Any `_`-prefixed name (module, class, or function) is explicitly not part of the public API and may change between any versions (this is in the README and is load-bearing for semver). New helpers default to a `_`-prefixed name unless they're being deliberately added to the public surface.
 - `RedisBackend` (and `FallbackRateLimiter`, `InFlightRequest`, `ModelLimits`) are **lazy-imported** via `__getattr__` so the package imports cleanly without the `redis` extra installed. Don't add eager `from .backends import RedisBackend` at module top — it'll break users who haven't installed `[redis]`.
 
