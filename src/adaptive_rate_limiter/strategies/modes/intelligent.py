@@ -265,6 +265,11 @@ class IntelligentModeStrategy(BaseSchedulingModeStrategy):
         # Cold start probing. Cold-start stampede protection is provided by
         # the probe gating in _try_process_next_request_intelligent().
         self._bucket_probes: set[str] = set()
+        # Guards the check-then-add on _bucket_probes. The per-queue lock is
+        # NOT sufficient: two resource types of one bucket map to different
+        # queue keys (different locks), so without this lock both could probe
+        # the same unverified bucket concurrently.
+        self._bucket_probe_lock = asyncio.Lock()
 
         # ===== RESERVATION TRACKING =====
         # Reservation tracking via composition (delegates storage operations)
@@ -800,21 +805,18 @@ class IntelligentModeStrategy(BaseSchedulingModeStrategy):
             state = await self.state_manager.get_state(bucket_id)
             # If state is unverified (never updated from headers), enforce probing
             if state and not getattr(state, "is_verified", True):
-                if bucket_id in self._bucket_probes:
-                    # Probe already active, wait
+                if not await self._try_acquire_probe(bucket_id):
+                    # Probe already active for this bucket, wait
                     return False
-                else:
-                    # Start probe
-                    self._bucket_probes.add(bucket_id)
-                    logger.info(f"Starting cold start probe for bucket {bucket_id}")
-                    # Proceed to reserve capacity for the probe
+                logger.info(f"Starting cold start probe for bucket {bucket_id}")
+                # Proceed to reserve capacity for the probe
 
         if not await self._check_and_reserve_capacity_intelligent(
             request.metadata, schedule_watcher=False, bucket_id=bucket_id
         ):
             # If reservation failed, we must clear the probe flag if we set it
-            if bucket_id and bucket_id in self._bucket_probes:
-                self._bucket_probes.discard(bucket_id)
+            if bucket_id:
+                await self._release_probe(bucket_id)
 
             logger.debug(
                 f"Capacity check failed for request {request.metadata.request_id}"
@@ -845,8 +847,12 @@ class IntelligentModeStrategy(BaseSchedulingModeStrategy):
                             schedule_watcher=False,
                             bucket_id=bucket_id,
                         ):
-                            # Retry successful! Proceed to process request
-                            pass
+                            # Retry successful! Re-claim the probe slot so the
+                            # in-flight probe still gates concurrent requests
+                            # until this request completes (cleared in finally).
+                            if bucket_id:
+                                await self._try_acquire_probe(bucket_id)
+                            # Proceed to process request
                         else:
                             # Retry failed - Schedule Watcher
                             if current_state.reset_at:
@@ -1357,7 +1363,7 @@ class IntelligentModeStrategy(BaseSchedulingModeStrategy):
         finally:
             # Clear probe flag if this was a probe
             if bucket_id and bucket_id in self._bucket_probes:
-                self._bucket_probes.discard(bucket_id)
+                await self._release_probe(bucket_id)
                 logger.debug(f"Cold start probe finished for bucket {bucket_id}")
                 # Wake up scheduler to process queued requests (fire-and-forget with exception handling)
                 task = asyncio.create_task(self._safe_set_wakeup_event())
@@ -1369,6 +1375,23 @@ class IntelligentModeStrategy(BaseSchedulingModeStrategy):
             async with self._task_lock:
                 self._active_tasks.pop(task_id, None)
                 self._active_request_count = max(0, self._active_request_count - 1)
+
+    async def _try_acquire_probe(self, bucket_id: str) -> bool:
+        """Atomically claim the cold-start probe slot for a bucket.
+
+        Returns True if this caller now owns the probe, False if a probe is
+        already active for the bucket.
+        """
+        async with self._bucket_probe_lock:
+            if bucket_id in self._bucket_probes:
+                return False
+            self._bucket_probes.add(bucket_id)
+            return True
+
+    async def _release_probe(self, bucket_id: str) -> None:
+        """Release the cold-start probe slot for a bucket."""
+        async with self._bucket_probe_lock:
+            self._bucket_probes.discard(bucket_id)
 
     def _is_rate_limit_error(self, error: Exception) -> bool:
         """Check if an exception is a rate limit error."""

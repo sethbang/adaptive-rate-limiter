@@ -131,3 +131,13 @@ class TestIntelligentModeStrategyColdStartProbe:
         assert result is False
         # Probe should be cleared on failure
         assert "bucket-1" not in strategy._bucket_probes
+
+    @pytest.mark.asyncio
+    async def test_probe_check_and_add_is_atomic_for_same_bucket(self, strategy):
+        """Concurrent probe attempts for the same bucket must not both start."""
+        bucket_id = "bucket-x"
+
+        results = await asyncio.gather(
+            *(strategy._try_acquire_probe(bucket_id) for _ in range(10))
+        )
+        assert sum(results) == 1, "exactly one concurrent probe may start"
