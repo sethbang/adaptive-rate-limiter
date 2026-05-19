@@ -24,7 +24,7 @@ from adaptive_rate_limiter.scheduler import (
 
 ## RateLimiterConfig
 
-The `RateLimiterConfig` class controls the core behavior of the scheduler. It has 24 configurable fields.
+The `RateLimiterConfig` class controls the core behavior of the scheduler. It has 29 configurable fields.
 
 ```python
 from adaptive_rate_limiter.scheduler import RateLimiterConfig, SchedulerMode
@@ -55,6 +55,15 @@ config = RateLimiterConfig(
 |--------|------|---------|-------------|
 | `request_timeout` | `float` | `30.0` | Request timeout duration in seconds. |
 | `enable_priority_scheduling` | `bool` | `True` | Enable priority-based request scheduling. |
+
+### Retry, Batching & Tracking
+
+| Option | Type | Default | Description |
+|--------|------|---------|-------------|
+| `max_retries` | `int` | `3` | Maximum retry attempts for a failed request (BASIC mode). |
+| `batch_size` | `int` | `50` | Number of eligible queues processed per scheduler iteration (INTELLIGENT mode). |
+| `stale_entry_ttl` | `float \| None` | `None` | TTL in seconds for per-model request-tracking entries (BASIC mode). `None` disables age-based cleanup of tracking state. |
+| `max_tracking_entries` | `int \| None` | `None` | Maximum number of per-model request-tracking entries to retain (BASIC mode). `None` means unbounded. |
 
 ### Rate Limiting Integration
 
@@ -125,7 +134,7 @@ config = RateLimiterConfig(
     overflow_policy="drop_oldest",  # OK: valid option
 )
 
-# Invalid configuration (will raise ValidationError)
+# Invalid configuration (will raise ValueError)
 config = RateLimiterConfig(
     rate_limit_buffer_ratio=1.5,    # ERROR: > 1.0
 )
