@@ -441,9 +441,10 @@ class TestAccountModeStrategyLifecycle:
         mock_config.conservative_multiplier = 0.9
         mock_config.scheduler_interval = 0.01
         mock_config.max_queue_size = 100
-        # request_timeout must be a real number: the scheduling loop passes it
-        # to asyncio.wait_for(), which compares it against 0. A Mock here makes
-        # the spawned execution task die with an unawaited TypeError.
+        # request_timeout must be a real number: _execute_account_request
+        # passes it to asyncio.wait_for(), which compares it against 0. A Mock
+        # here makes the spawned execution task die with an unawaited
+        # TypeError, leaking the request coroutine.
         mock_config.request_timeout = 1.0
         return AccountModeStrategy(mock_scheduler, mock_config, Mock())
 
@@ -509,9 +510,10 @@ class TestAccountModeStrategyMetrics:
         mock_config.conservative_multiplier = 0.9
         mock_config.scheduler_interval = 0.01
         mock_config.max_queue_size = 100
-        # request_timeout must be a real number: the scheduling loop passes it
-        # to asyncio.wait_for(), which compares it against 0. A Mock here makes
-        # the spawned execution task die with an unawaited TypeError.
+        # request_timeout must be a real number: _execute_account_request
+        # passes it to asyncio.wait_for(), which compares it against 0. A Mock
+        # here makes the spawned execution task die with an unawaited
+        # TypeError, leaking the request coroutine.
         mock_config.request_timeout = 1.0
         return AccountModeStrategy(mock_scheduler, mock_config, Mock())
 

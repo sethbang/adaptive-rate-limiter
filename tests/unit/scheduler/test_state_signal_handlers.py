@@ -279,7 +279,9 @@ class TestSignalHandler:
 class TestFlushPendingUpdatesSync:
     """Tests for _flush_pending_updates_sync."""
 
-    def test_flush_pending_updates_sync_flushes_data(self, write_back_manager):
+    def test_flush_pending_updates_sync_flushes_data(
+        self, write_back_manager, close_coro
+    ):
         """Test _flush_pending_updates_sync actually flushes pending updates."""
         # Add pending updates with PendingUpdate wrapper
         entry1 = StateEntry(key="test1", data={"value": 1})
@@ -293,7 +295,7 @@ class TestFlushPendingUpdatesSync:
         with patch("asyncio.get_event_loop") as mock_get_loop:
             mock_loop = MagicMock()
             mock_loop.is_running.return_value = False
-            mock_loop.run_until_complete = MagicMock()
+            mock_loop.run_until_complete = MagicMock(side_effect=close_coro())
             mock_get_loop.return_value = mock_loop
 
             write_back_manager._flush_pending_updates_sync()
@@ -304,7 +306,9 @@ class TestFlushPendingUpdatesSync:
         # Pending updates should be cleared
         assert len(write_back_manager._pending_updates) == 0
 
-    def test_flush_pending_updates_sync_with_pending_update(self, write_back_manager):
+    def test_flush_pending_updates_sync_with_pending_update(
+        self, write_back_manager, close_coro
+    ):
         """Test _flush_pending_updates_sync handles PendingUpdate objects."""
         # Add pending updates as PendingUpdate wrapper
         entry = StateEntry(key="test", data={"value": 1})
@@ -315,7 +319,7 @@ class TestFlushPendingUpdatesSync:
         with patch("asyncio.get_event_loop") as mock_get_loop:
             mock_loop = MagicMock()
             mock_loop.is_running.return_value = False
-            mock_loop.run_until_complete = MagicMock()
+            mock_loop.run_until_complete = MagicMock(side_effect=close_coro())
             mock_get_loop.return_value = mock_loop
 
             write_back_manager._flush_pending_updates_sync()
@@ -335,7 +339,7 @@ class TestFlushPendingUpdatesSync:
         assert len(write_back_manager._pending_updates) == 0
 
     def test_flush_pending_updates_sync_handles_running_loop(
-        self, write_back_manager, caplog
+        self, write_back_manager, caplog, close_coro
     ):
         """Test _flush_pending_updates_sync uses run_coroutine_threadsafe when loop is running."""
         entry = StateEntry(key="test", data={"value": 1})
@@ -357,6 +361,7 @@ class TestFlushPendingUpdatesSync:
                 "adaptive_rate_limiter.scheduler.state.manager.asyncio.run_coroutine_threadsafe"
             ) as mock_run_threadsafe:
                 mock_run_threadsafe.return_value = mock_future
+                mock_run_threadsafe.side_effect = close_coro()
 
                 write_back_manager._flush_pending_updates_sync()
 
@@ -366,7 +371,7 @@ class TestFlushPendingUpdatesSync:
                 mock_future.result.assert_called_once_with(timeout=5.0)
 
     def test_flush_pending_updates_sync_handles_errors(
-        self, write_back_manager, caplog
+        self, write_back_manager, caplog, close_coro
     ):
         """Test _flush_pending_updates_sync handles errors during flush."""
         entry = StateEntry(key="test", data={"value": 1})
@@ -380,7 +385,9 @@ class TestFlushPendingUpdatesSync:
         ):
             mock_loop = MagicMock()
             mock_loop.is_running.return_value = False
-            mock_loop.run_until_complete.side_effect = Exception("Backend error")
+            mock_loop.run_until_complete.side_effect = close_coro(
+                raises=Exception("Backend error")
+            )
             mock_get_loop.return_value = mock_loop
 
             write_back_manager._flush_pending_updates_sync()
@@ -498,7 +505,9 @@ class TestIntegration:
             assert signal.getsignal(signal.SIGINT) == original_sigint
 
     @pytest.mark.asyncio
-    async def test_pending_updates_flushed_on_signal(self, write_back_manager):
+    async def test_pending_updates_flushed_on_signal(
+        self, write_back_manager, close_coro
+    ):
         """Test that pending updates are flushed when signal is received."""
         with (
             patch.object(write_back_manager, "_batch_loop", new_callable=AsyncMock),
@@ -530,6 +539,7 @@ class TestIntegration:
                     "adaptive_rate_limiter.scheduler.state.manager.asyncio.run_coroutine_threadsafe"
                 ) as mock_run_threadsafe:
                     mock_run_threadsafe.return_value = mock_future
+                    mock_run_threadsafe.side_effect = close_coro()
 
                     write_back_manager._signal_handler(signal.SIGTERM, None)
 

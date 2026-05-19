@@ -6,6 +6,7 @@ Tests streaming detection, cleanup, wrapping, and stale streaming handling.
 
 import asyncio
 import contextlib
+import itertools
 import logging
 import time
 import weakref
@@ -122,20 +123,27 @@ class TestIntelligentModeStrategyStreamingCleanup:
 
         wrapper = FakeWrapper()
 
-        await strategy._streaming_cleanup_manager.register(
-            "res-123", "bucket-1", 1000, wrapper
-        )
+        # Windows' time.monotonic() has ~16ms resolution, so a real sub-tick
+        # sleep between register() and update_activity() can read the same
+        # value. Drive the clock deterministically instead.
+        clock = itertools.count(1.0)
+        with patch(
+            "adaptive_rate_limiter.strategies.modes.streaming_cleanup.time.monotonic",
+            side_effect=lambda: next(clock),
+        ):
+            await strategy._streaming_cleanup_manager.register(
+                "res-123", "bucket-1", 1000, wrapper
+            )
+            old_time = strategy._streaming_cleanup_manager._streaming_in_flight[
+                "res-123"
+            ].last_activity_at
 
-        old_time = strategy._streaming_cleanup_manager._streaming_in_flight[
-            "res-123"
-        ].last_activity_at
-        await asyncio.sleep(0.01)
+            await strategy._streaming_cleanup_manager.update_activity("res-123")
 
-        await strategy._streaming_cleanup_manager.update_activity("res-123")
+            new_time = strategy._streaming_cleanup_manager._streaming_in_flight[
+                "res-123"
+            ].last_activity_at
 
-        new_time = strategy._streaming_cleanup_manager._streaming_in_flight[
-            "res-123"
-        ].last_activity_at
         assert new_time > old_time
 
 
