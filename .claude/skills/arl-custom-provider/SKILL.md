@@ -13,7 +13,7 @@ provider is user-supplied, then passed to `create_scheduler(provider=...)`.
 
 ```python
 from adaptive_rate_limiter import (
-    ProviderInterface, DiscoveredBucket, RateLimitInfo,
+    ProviderInterface, DiscoveredBucket, RateLimitInfo, ProviderError,
 )
 ```
 
@@ -78,7 +78,11 @@ class MyProvider(ProviderInterface):
   return `{}` (not raise) when the API has no discovery endpoint.
 - `get_bucket_for_model` maps model ids to bucket ids; returning `model_id`
   itself is a sound fallback for unknown models (it guarantees isolation).
-- Raise `BackendConnectionError` if the provider cannot be reached.
+- Raise `ProviderError` (from `adaptive_rate_limiter`) when `discover_limits`,
+  `parse_rate_limit_response`, or `get_bucket_for_model` cannot complete — for
+  example, when the upstream discovery API returns a 4xx/5xx response. Do
+  **not** raise `BackendConnectionError` from provider code; that exception is
+  reserved for storage-backend failures (Redis, in-memory).
 
 ## Wiring it in
 
