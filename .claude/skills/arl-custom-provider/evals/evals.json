@@ -1,0 +1,37 @@
+{
+  "skill_name": "arl-custom-provider",
+  "evals": [
+    {
+      "id": 1,
+      "prompt": "Write a provider for an Anthropic-style API that reads rate limits from response headers, so adaptive-rate-limiter can track them.",
+      "expected_output": "A class subclassing ProviderInterface implementing all four abstract members.",
+      "files": [],
+      "expectations": [
+        "Subclasses ProviderInterface",
+        "Implements all four members: name, discover_limits, parse_rate_limit_response, get_bucket_for_model",
+        "parse_rate_limit_response returns a RateLimitInfo and sets is_rate_limited when status_code is 429",
+        "Matches rate-limit header names case-insensitively"
+      ]
+    },
+    {
+      "id": 2,
+      "prompt": "My API has no endpoint to list rate limits up front — limits only appear in response headers. What should discover_limits return in my adaptive-rate-limiter provider?",
+      "expected_output": "Explains discover_limits should return an empty dict when discovery is unsupported.",
+      "files": [],
+      "expectations": [
+        "States discover_limits should return an empty dict when discovery is unsupported",
+        "States discover_limits should not raise an exception in that case"
+      ]
+    },
+    {
+      "id": 3,
+      "prompt": "How do I implement get_bucket_for_model in my adaptive-rate-limiter provider when some models I don't recognize?",
+      "expected_output": "Implements get_bucket_for_model and explains returning model_id as a fallback.",
+      "files": [],
+      "expectations": [
+        "Implements get_bucket_for_model as an async method returning a string",
+        "Explains that returning model_id itself is a safe fallback for unknown models"
+      ]
+    }
+  ]
+}
