@@ -1124,12 +1124,24 @@ class TestRedisBackendExtras:
         """Test forcing circuit break."""
         assert not await backend.is_circuit_broken()
 
-        await backend.force_circuit_break(0.1)
-        assert await backend.is_circuit_broken()
+        # Wait deterministically for the fire-and-forget auto-clear task to
+        # finish instead of racing a fixed sleep against a coarse timer.
+        real_clear_failures = backend.clear_failures
+        cleared = asyncio.Event()
 
-        # Wait for auto-clear
-        await asyncio.sleep(0.2)
-        assert not await backend.is_circuit_broken()
+        async def signalling_clear_failures():
+            await real_clear_failures()
+            cleared.set()
+
+        with patch.object(
+            backend, "clear_failures", side_effect=signalling_clear_failures
+        ):
+            await backend.force_circuit_break(0.1)
+            assert await backend.is_circuit_broken()
+
+            # Wait for auto-clear
+            await asyncio.wait_for(cleared.wait(), timeout=5.0)
+            assert not await backend.is_circuit_broken()
 
     @pytest.mark.asyncio
     async def test_release_reservation_by_id_not_found(self, backend):

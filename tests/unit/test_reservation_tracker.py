@@ -2,6 +2,7 @@
 
 import asyncio
 import time
+from unittest.mock import patch
 
 import pytest
 
@@ -314,13 +315,26 @@ class TestReservationTracker:
 
         assert tracker.reservation_count == 1
 
-        await tracker.start()
-        try:
-            # Wait for cleanup to run
-            await asyncio.sleep(0.3)
-            assert tracker.reservation_count == 0
-        finally:
-            await tracker.stop()
+        # Wait deterministically for the cleanup loop to invoke the stale
+        # sweep instead of racing a fixed sleep against a coarse timer.
+        real_cleanup_stale = tracker._cleanup_stale
+        cleaned = asyncio.Event()
+
+        async def signalling_cleanup_stale():
+            result = await real_cleanup_stale()
+            cleaned.set()
+            return result
+
+        with patch.object(
+            tracker, "_cleanup_stale", side_effect=signalling_cleanup_stale
+        ):
+            await tracker.start()
+            try:
+                # Wait for cleanup to run
+                await asyncio.wait_for(cleaned.wait(), timeout=5.0)
+                assert tracker.reservation_count == 0
+            finally:
+                await tracker.stop()
 
     @pytest.mark.asyncio
     async def test_overwrite_reservation(self, tracker):

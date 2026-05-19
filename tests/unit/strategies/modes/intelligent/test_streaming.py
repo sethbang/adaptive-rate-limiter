@@ -679,15 +679,35 @@ class TestIntelligentModeStrategyStreamingCleanupLogging:
         strategy._streaming_cleanup_manager._activity_timeout = 0.001
         strategy._streaming_cleanup_manager._running = True
 
-        with caplog.at_level(logging.INFO):
-            task = asyncio.create_task(
-                strategy._streaming_cleanup_manager._cleanup_loop()
-            )
-            await asyncio.sleep(0.05)
-            strategy._streaming_cleanup_manager._running = False
-            task.cancel()
-            with contextlib.suppress(asyncio.CancelledError):
-                await task
+        # Wait deterministically for a cleanup-loop iteration *after* the one
+        # that cleaned the entry, instead of racing a fixed sleep against a
+        # coarse (Windows ~16ms) timer. The loop logs synchronously right
+        # after _cleanup_stale returns, so by the time the second call runs
+        # the log line from the first iteration is already emitted.
+        manager = strategy._streaming_cleanup_manager
+        real_cleanup_stale = manager._cleanup_stale
+        call_count = 0
+        logged = asyncio.Event()
+
+        async def counting_cleanup_stale():
+            nonlocal call_count
+            call_count += 1
+            if call_count >= 2:
+                logged.set()
+            return await real_cleanup_stale()
+
+        with (
+            caplog.at_level(logging.INFO),
+            patch.object(manager, "_cleanup_stale", side_effect=counting_cleanup_stale),
+        ):
+            task = asyncio.create_task(manager._cleanup_loop())
+            try:
+                await asyncio.wait_for(logged.wait(), timeout=5.0)
+            finally:
+                manager._running = False
+                task.cancel()
+                with contextlib.suppress(asyncio.CancelledError):
+                    await task
 
         assert "Streaming cleanup released" in caplog.text
 

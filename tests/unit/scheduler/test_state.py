@@ -68,13 +68,21 @@ class TestStateEntry:
         assert not entry.is_expired
 
     def test_update_data(self):
-        entry = StateEntry(key="test", data={"val": 1})
-        original_updated_at = entry.updated_at
+        # Drive datetime.now() deterministically so the updated_at comparison
+        # cannot tie on a coarse (Windows ~16ms) timer.
+        clock = {"now": datetime(2026, 1, 1, tzinfo=timezone.utc)}
+        with patch(
+            "adaptive_rate_limiter.scheduler.state.models.datetime", wraps=datetime
+        ) as mock_dt:
+            mock_dt.now.side_effect = lambda tz=None: clock["now"]
 
-        # Wait a bit to ensure timestamp changes
-        time.sleep(0.001)
+            entry = StateEntry(key="test", data={"val": 1})
+            original_updated_at = entry.updated_at
 
-        entry.update_data({"val": 2, "new": 3})
+            # Advance the clock so the update timestamp is strictly later.
+            clock["now"] += timedelta(seconds=1)
+
+            entry.update_data({"val": 2, "new": 3})
 
         assert entry.data["val"] == 2
         assert entry.data["new"] == 3
@@ -580,16 +588,24 @@ class TestCacheLifecycle:
         # Use ttl_override of 0.001 seconds (1ms) - will expire almost immediately
         await cache.set(entry, ttl_override=0.001)
 
-        # Wait for the entry to expire
-        await asyncio.sleep(0.01)
+        # Wait deterministically for the cleanup loop to invoke the expiry
+        # sweep instead of racing fixed sleeps against a coarse timer. By the
+        # time the loop ticks, the 1ms TTL has long since elapsed.
+        real_cleanup = cache._cleanup_expired
+        cleaned = asyncio.Event()
 
-        # Start cache
-        await cache.start()
+        async def signalling_cleanup():
+            await real_cleanup()
+            cleaned.set()
 
-        # Wait for cleanup to run
-        await asyncio.sleep(0.05)
+        with patch.object(cache, "_cleanup_expired", side_effect=signalling_cleanup):
+            # Start cache
+            await cache.start()
 
-        assert "expired" not in cache._cache
+            # Wait for cleanup to run
+            await asyncio.wait_for(cleaned.wait(), timeout=5.0)
+
+            assert "expired" not in cache._cache
 
         await cache.stop()
 

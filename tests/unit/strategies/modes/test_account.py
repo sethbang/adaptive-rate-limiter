@@ -375,8 +375,13 @@ class TestAccountModeStrategyExecution:
     async def test_execute_request_tracks_active(self, strategy, metadata):
         """Test active request tracking during execution."""
         event = asyncio.Event()
+        started = asyncio.Event()
 
         async def slow_request():
+            # Reaching here proves _execute_account_request already
+            # registered the request as active. Signal deterministically
+            # instead of racing a fixed sleep against a coarse timer.
+            started.set()
             await event.wait()
             return "success"
 
@@ -390,8 +395,8 @@ class TestAccountModeStrategyExecution:
         # Start execution in background
         task = asyncio.create_task(strategy._execute_account_request(queued_request))
 
-        # Allow task to start
-        await asyncio.sleep(0.01)
+        # Wait until the request function has actually started running
+        await asyncio.wait_for(started.wait(), timeout=5.0)
 
         # Should be tracked as active
         assert strategy.active_count == 1

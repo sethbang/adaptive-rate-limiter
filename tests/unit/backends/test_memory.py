@@ -157,16 +157,21 @@ class TestMemoryBackend:
     async def test_ttl_behavior(self):
         """Test that keys expire."""
         backend = MemoryBackend(namespace="test", key_ttl=0.1)  # type: ignore
-        await backend.set_state("bucket-1", {"data": 1})
 
-        # Should exist immediately
-        assert await backend.get_state("bucket-1") is not None
+        # Drive the clock deterministically so expiry doesn't race a coarse
+        # (Windows ~16ms) timer against a fixed sleep.
+        clock = {"now": 1000.0}
+        with patch("time.time", side_effect=lambda: clock["now"]):
+            await backend.set_state("bucket-1", {"data": 1})
 
-        # Wait for expiration
-        await asyncio.sleep(0.2)
+            # Should exist immediately
+            assert await backend.get_state("bucket-1") is not None
 
-        # Should be gone
-        assert await backend.get_state("bucket-1") is None
+            # Advance past the TTL
+            clock["now"] += 0.2
+
+            # Should be gone
+            assert await backend.get_state("bucket-1") is None
 
     @pytest.mark.asyncio
     async def test_thread_safety(self, backend):
@@ -279,13 +284,18 @@ class TestMemoryBackend:
 
     @pytest.mark.asyncio
     async def test_circuit_breaker(self, backend):
-        assert await backend.is_circuit_broken() is False
+        # Drive the clock deterministically so the auto-clear doesn't race a
+        # coarse (Windows ~16ms) timer against a fixed sleep.
+        clock = {"now": 1000.0}
+        with patch("time.time", side_effect=lambda: clock["now"]):
+            assert await backend.is_circuit_broken() is False
 
-        await backend.force_circuit_break(duration=0.1)
-        assert await backend.is_circuit_broken() is True
+            await backend.force_circuit_break(duration=0.1)
+            assert await backend.is_circuit_broken() is True
 
-        await asyncio.sleep(0.2)
-        assert await backend.is_circuit_broken() is False
+            # Advance past the circuit-break duration
+            clock["now"] += 0.2
+            assert await backend.is_circuit_broken() is False
 
     @pytest.mark.asyncio
     async def test_get_rate_limits(self, backend):
@@ -333,15 +343,19 @@ class TestMemoryBackend:
         """Test cleanup of released reservations."""
         backend.released_reservations_ttl = 0.1  # type: ignore
 
-        # Add a released reservation
-        backend._released_reservations["key"].add("res-1")
-        backend._released_reservation_timestamps["key"]["res-1"] = time.time()
+        # Drive the clock deterministically so expiry doesn't race a coarse
+        # (Windows ~16ms) timer against a fixed sleep.
+        clock = {"now": 1000.0}
+        with patch("time.time", side_effect=lambda: clock["now"]):
+            # Add a released reservation
+            backend._released_reservations["key"].add("res-1")
+            backend._released_reservation_timestamps["key"]["res-1"] = time.time()
 
-        # Wait for expiration
-        await asyncio.sleep(0.2)
+            # Advance past the TTL
+            clock["now"] += 0.2
 
-        # Run cleanup
-        await backend._cleanup_released_reservations()
+            # Run cleanup
+            await backend._cleanup_released_reservations()
 
         assert "res-1" not in backend._released_reservations["key"]
         assert "key" not in backend._released_reservation_timestamps
@@ -351,18 +365,23 @@ class TestMemoryBackend:
         """Test auto cleanup of expired entries."""
         backend.key_ttl = 0.1  # type: ignore
 
-        await backend.set_state("bucket-1", {})
-        await backend.cache_bucket_info({}, ttl_seconds=0.1)
-        await backend.cache_model_info("model-1", {}, ttl_seconds=0.1)
+        # Drive the clock deterministically so expiry doesn't race a coarse
+        # (Windows ~16ms) timer against a fixed sleep.
+        clock = {"now": 1000.0}
+        with patch("time.time", side_effect=lambda: clock["now"]):
+            await backend.set_state("bucket-1", {})
+            await backend.cache_bucket_info({}, ttl_seconds=0.1)
+            await backend.cache_model_info("model-1", {}, ttl_seconds=0.1)
 
-        await asyncio.sleep(0.2)
+            # Advance past the TTL
+            clock["now"] += 0.2
 
-        async with backend._lock:
-            backend._auto_cleanup_locked()
+            async with backend._lock:
+                backend._auto_cleanup_locked()
 
-        assert await backend.get_state("bucket-1") is None
-        assert await backend.get_cached_bucket_info() is None
-        assert await backend.get_cached_model_info("model-1") is None
+            assert await backend.get_state("bucket-1") is None
+            assert await backend.get_cached_bucket_info() is None
+            assert await backend.get_cached_model_info("model-1") is None
 
     @pytest.mark.asyncio
     async def test_check_and_reserve_capacity_limit_update(self, backend):
@@ -705,17 +724,31 @@ class TestMemoryBackend:
         """Test cleanup loop handles exceptions gracefully."""
         backend.released_reservations_cleanup_interval = 0.01
 
+        # A second call proves the loop survived the first exception. Signal
+        # the test deterministically instead of racing a fixed sleep against
+        # a coarse (Windows ~16ms) timer.
+        call_count = 0
+        continued = asyncio.Event()
+
+        def failing_cleanup():
+            nonlocal call_count
+            call_count += 1
+            if call_count >= 2:
+                continued.set()
+            raise RuntimeError("test error")
+
         # Mock cleanup to raise exception
         with patch.object(
             backend,
             "_cleanup_released_reservations",
-            side_effect=RuntimeError("test error"),
+            side_effect=failing_cleanup,
         ):
             await backend.start()
-            await asyncio.sleep(0.05)
+            await asyncio.wait_for(continued.wait(), timeout=5.0)
 
             # Lines 837-838: Loop should continue despite errors
             assert backend._running is True
+            assert call_count >= 2
 
         await backend.stop()
 
@@ -865,14 +898,28 @@ class TestMemoryBackendRequestSequenceCleanup:
         backend._request_sequences["orphan"] = 5
         backend._request_sequence_timestamps["orphan"] = old_time
 
-        # Start the backend (starts cleanup loop)
-        await backend.start()
+        # Wait deterministically for the cleanup loop to invoke the orphan
+        # sweep instead of racing a fixed sleep against a coarse timer.
+        real_cleanup = backend._cleanup_orphaned_request_sequences
+        cleaned = asyncio.Event()
 
-        # Wait for cleanup to run
-        await asyncio.sleep(0.1)
+        async def signalling_cleanup():
+            await real_cleanup()
+            cleaned.set()
 
-        # Orphan should be cleaned up
-        assert "orphan" not in backend._request_sequences
+        with patch.object(
+            backend,
+            "_cleanup_orphaned_request_sequences",
+            side_effect=signalling_cleanup,
+        ):
+            # Start the backend (starts cleanup loop)
+            await backend.start()
+
+            # Wait for cleanup to run
+            await asyncio.wait_for(cleaned.wait(), timeout=5.0)
+
+            # Orphan should be cleaned up
+            assert "orphan" not in backend._request_sequences
 
         await backend.stop()
 
