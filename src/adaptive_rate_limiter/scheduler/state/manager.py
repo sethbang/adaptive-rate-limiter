@@ -257,11 +257,11 @@ class StateManager:
         For running event loops, uses asyncio.run_coroutine_threadsafe() with a timeout
         to block until writes complete, ensuring data is flushed before signal handler exits.
         """
-        if not self._pending_updates:
-            return
-
-        # Get a copy of pending updates under lock
+        # Get a copy of pending updates under lock; the empty-check is inside
+        # the lock so we never read _pending_updates outside of it.
         with self._pending_updates_thread_lock:
+            if not self._pending_updates:
+                return
             updates = self._pending_updates[:]
             self._pending_updates.clear()
 
@@ -947,11 +947,11 @@ class StateManager:
         Updates that exceed the max retry limit are dropped and logged as errors.
         """
         async with self._batch_lock:
-            if not self._pending_updates:
-                return
-
-            updates = self._pending_updates[:]
-            self._pending_updates.clear()
+            with self._pending_updates_thread_lock:
+                if not self._pending_updates:
+                    return
+                updates = self._pending_updates[:]
+                self._pending_updates.clear()
             self._last_batch_time = time.time()
 
         current_time = time.time()
@@ -1012,7 +1012,8 @@ class StateManager:
         if failed_updates:
             async with self._batch_lock:
                 # Prepend to give them priority on next flush
-                self._pending_updates = failed_updates + self._pending_updates
+                with self._pending_updates_thread_lock:
+                    self._pending_updates = failed_updates + self._pending_updates
             logger.warning(
                 f"Re-queued {len(failed_updates)} state update(s) for retry "
                 f"(max retries: {self.config.flush_max_retries})"
