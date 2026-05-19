@@ -875,3 +875,107 @@ class TestMemoryBackendRequestSequenceCleanup:
         assert "orphan" not in backend._request_sequences
 
         await backend.stop()
+
+
+class TestMemoryBackendRefundHeaderSyncReconciliation:
+    """Streaming refund must reconcile with the header-sync path.
+
+    Audit C1: release_streaming_reservation blindly added the refund to the
+    current remaining_tokens. If update_rate_limits replaced remaining_tokens
+    from server headers between the reservation and the refund, the refund
+    credited tokens against a baseline that never carried the reservation
+    debit -> over-admission.
+    """
+
+    @pytest.fixture
+    def backend(self):
+        return MemoryBackend(namespace="test", key_ttl=3600)
+
+    @pytest.mark.asyncio
+    async def test_refund_applied_when_no_header_sync_between_reserve_release(
+        self, backend
+    ):
+        """With no intervening header sync, the refund applies normally."""
+        await backend.set_state(
+            "bucket-1",
+            {
+                "remaining_requests": 100,
+                "remaining_tokens": 1000,
+                "request_limit": 100,
+                "token_limit": 1000,
+                "last_updated": time.time(),
+            },
+        )
+
+        success, reservation_id = await backend.check_and_reserve_capacity(
+            key="bucket-1",
+            requests=1,
+            tokens=500,
+            bucket_limits={"rpm_limit": 100, "tpm_limit": 1000},
+        )
+        assert success is True
+        # Reservation deducted 500: 1000 -> 500.
+        assert (await backend.get_state("bucket-1"))["remaining_tokens"] == 500
+
+        # Stream used only 100 of the reserved 500 -> refund 400.
+        released = await backend.release_streaming_reservation(
+            key="bucket-1",
+            reservation_id=reservation_id,
+            reserved_tokens=500,
+            actual_tokens=100,
+        )
+        assert released is True
+        # 500 + 400 refund = 900.
+        assert (await backend.get_state("bucket-1"))["remaining_tokens"] == 900
+
+    @pytest.mark.asyncio
+    async def test_refund_skipped_when_header_sync_supersedes_reservation(
+        self, backend
+    ):
+        """If a header sync replaced the state after the reservation, the
+        refund must NOT be applied: the server header is authoritative and
+        already reflects reality. Adding the refund would over-admit."""
+        await backend.set_state(
+            "bucket-1",
+            {
+                "remaining_requests": 100,
+                "remaining_tokens": 1000,
+                "request_limit": 100,
+                "token_limit": 1000,
+                "last_updated": time.time(),
+            },
+        )
+
+        success, reservation_id = await backend.check_and_reserve_capacity(
+            key="bucket-1",
+            requests=1,
+            tokens=500,
+            bucket_limits={"rpm_limit": 100, "tpm_limit": 1000},
+        )
+        assert success is True
+
+        # A server header update lands before the stream finishes. The
+        # server reports 300 tokens remaining; this wholesale-replaces state.
+        await backend.update_rate_limits(
+            "bucket-1",
+            {
+                "x-ratelimit-remaining-requests": "40",
+                "x-ratelimit-remaining-tokens": "300",
+                "x-ratelimit-limit-tokens": "1000",
+            },
+            bucket_id="bucket-1",
+        )
+        assert (await backend.get_state("bucket-1"))["remaining_tokens"] == 300
+
+        # Stream completes: reserved 500, used 100.
+        released = await backend.release_streaming_reservation(
+            key="bucket-1",
+            reservation_id=reservation_id,
+            reserved_tokens=500,
+            actual_tokens=100,
+        )
+        assert released is True
+
+        # The refund must be skipped: state stays at the server-authoritative
+        # 300, NOT 300 + 400 = 700.
+        assert (await backend.get_state("bucket-1"))["remaining_tokens"] == 300

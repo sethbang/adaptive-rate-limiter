@@ -223,7 +223,7 @@ class TestStaleHeapEntryCleanup:
         # The entry's timestamp is from when it was created
         old_entry = tracker._time_heap[0]
         # Replace with an older timestamp to trigger cleanup
-        tracker._time_heap[0] = (time.time() - 2, old_entry[1])
+        tracker._time_heap[0] = (time.monotonic() - 2, old_entry[1])
 
         # Run cleanup - should skip the orphaned entry
         cleaned = await tracker._cleanup_stale()
@@ -248,7 +248,7 @@ class TestStaleHeapEntryCleanup:
         )
 
         # Store an old reservation
-        old_time = time.time() - 5  # 5 seconds ago
+        old_time = time.monotonic() - 5  # 5 seconds ago
         await tracker.store("req-replaced", "bucket-a", "res-old", 50)
 
         # Manually age it
@@ -288,7 +288,7 @@ class TestStaleHeapEntryCleanup:
             stale_cleanup_interval=3600,
         )
 
-        now = time.time()
+        now = time.monotonic()
         old_time = now - 5  # 5 seconds ago (stale)
         fresh_time = now + 10  # Future (not stale)
 
@@ -378,7 +378,7 @@ class TestHighConcurrencyScenarios:
         for i in range(20):
             await tracker.store(f"req-{i}", "bucket", f"res-{i}", 10)
             tracker._reservation_contexts[(f"req-{i}", "bucket")].created_at = (
-                time.time() - 5
+                time.monotonic() - 5
             )
 
         tracker._rebuild_time_heap()
@@ -451,7 +451,7 @@ class TestGetAndClearStaleHeapEdgeCases:
 
         # Store and immediately remove (creates orphan in heap)
         await tracker.store("req-orphan", "bucket-a", "res-orphan", 50)
-        old_time = time.time() - 10
+        old_time = time.monotonic() - 10
         tracker._reservation_contexts[("req-orphan", "bucket-a")].created_at = old_time
         tracker._rebuild_time_heap()
         await tracker.get_and_clear("req-orphan", "bucket-a")
@@ -464,7 +464,7 @@ class TestGetAndClearStaleHeapEdgeCases:
         assert tracker.reservation_count == 1
 
         # get_and_clear_stale should skip the orphan
-        cutoff = time.time() - 1
+        cutoff = time.monotonic() - 1
         stale = await tracker.get_and_clear_stale(cutoff)
 
         # No stale contexts returned (orphan skipped, fresh not stale)
@@ -482,7 +482,7 @@ class TestGetAndClearStaleHeapEdgeCases:
 
         # Store old entry
         await tracker.store("req-x", "bucket-a", "res-old", 50)
-        old_time = time.time() - 10
+        old_time = time.monotonic() - 10
         tracker._reservation_contexts[("req-x", "bucket-a")].created_at = old_time
         tracker._rebuild_time_heap()
 
@@ -493,7 +493,7 @@ class TestGetAndClearStaleHeapEdgeCases:
         assert len(tracker._time_heap) == 2
 
         # get_and_clear_stale should skip old entry (timestamp mismatch with current context)
-        cutoff = time.time() - 1
+        cutoff = time.monotonic() - 1
         stale = await tracker.get_and_clear_stale(cutoff)
 
         # No stale returned - old heap entry was skipped due to mismatch

@@ -35,3 +35,6 @@ tests/reports
 
 docs/architecture
 .vscode
+
+# Claude Code local session/settings dir
+.claude/

@@ -213,7 +213,7 @@ class TestIntelligentModeStrategyStaleCleanupExceptions:
             reservation_id="res-1",
             bucket_id="bucket-1",
             estimated_tokens=100,
-            created_at=time.time() - 1000,
+            created_at=time.monotonic() - 1000,
         )
         strategy_with_backend_error._reservation_tracker._request_id_index["req-1"] = {
             ("req-1", "bucket-1")
@@ -246,8 +246,8 @@ class TestIntelligentModeStrategyStaleCleanupExceptions:
             reservation_id="res-stale",
             bucket_id="bucket-1",
             reserved_tokens=1000,
-            started_at=time.time() - 1000,
-            last_activity_at=time.time() - 1000,
+            started_at=time.monotonic() - 1000,
+            last_activity_at=time.monotonic() - 1000,
             wrapper_ref=weakref.ref(wrapper),
         )
 

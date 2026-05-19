@@ -188,6 +188,14 @@ class StreamingHandler:
                 wrapped_iterator,
             )
 
+            # Hand off ownership: the iterator (and the StreamingCleanupManager
+            # registered above) now own this reservation's lifecycle. Remove it
+            # from the reservation tracker so the stale-reservation cleanup
+            # cannot reclaim a live, still-iterating stream.
+            await self._reservation_tracker.get_and_clear(
+                metadata.request_id, reservation.bucket_id
+            )
+
             logger.debug(
                 f"Wrapped streaming response for {metadata.request_id} "
                 f"(Stream class with _iterator)"
@@ -203,6 +211,11 @@ class StreamingHandler:
                 reservation.bucket_id,
                 reservation.estimated_tokens,
                 wrapped,
+            )
+
+            # Hand off ownership (see note above).
+            await self._reservation_tracker.get_and_clear(
+                metadata.request_id, reservation.bucket_id
             )
 
             logger.debug(

@@ -40,9 +40,13 @@ class StreamingInFlightEntry:
         reservation_id: Unique identifier for this reservation
         bucket_id: The rate limit bucket this reservation belongs to
         reserved_tokens: Number of tokens reserved at request start
-        started_at: Timestamp when streaming started
-        last_activity_at: Timestamp of last chunk received (updated on each chunk)
+        started_at: Monotonic timestamp when streaming started
+        last_activity_at: Monotonic timestamp of last chunk received
+            (updated on each chunk)
         wrapper_ref: Weak reference to the iterator wrapper for cleanup detection
+
+    All timestamps use ``time.monotonic()`` so staleness/abandonment
+    detection is immune to wall-clock (NTP) adjustments.
     """
 
     reservation_id: str
@@ -173,7 +177,7 @@ class StreamingInFlightTracker:
             reserved_tokens: Tokens that were reserved
             wrapper: The RateLimitedAsyncIterator instance (stored as weakref)
         """
-        now = time.time()
+        now = time.monotonic()
         entry = StreamingInFlightEntry(
             reservation_id=reservation_id,
             bucket_id=bucket_id,
@@ -225,7 +229,7 @@ class StreamingInFlightTracker:
         async with self._lock:
             entry = self._streaming_in_flight.get(reservation_id)
             if entry:
-                entry.last_activity_at = time.time()
+                entry.last_activity_at = time.monotonic()
 
     async def _cleanup_loop(self) -> None:
         """
@@ -270,7 +274,7 @@ class StreamingInFlightTracker:
         Returns:
             Number of stale entries cleaned up.
         """
-        now = time.time()
+        now = time.monotonic()
         cutoff = now - self._activity_timeout
         stale_entries: list[StreamingInFlightEntry] = []
 

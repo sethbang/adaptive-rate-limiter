@@ -57,8 +57,9 @@ class AccountModeStrategy(BaseSchedulingModeStrategy):
         self.active_requests: dict[str, QueuedRequest] = {}
         self.active_count = 0
 
-        # Account-specific configuration
-        self.max_concurrent_requests = getattr(config, "max_concurrent_requests", 10)
+        # Account-specific configuration. RateLimiterConfig exposes the
+        # concurrency limit as ``max_concurrent_executions``.
+        self.max_concurrent_requests = getattr(config, "max_concurrent_executions", 10)
         self.conservative_multiplier = getattr(config, "conservative_multiplier", 0.9)
 
         # Account metrics

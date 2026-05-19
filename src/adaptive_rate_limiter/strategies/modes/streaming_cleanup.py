@@ -103,7 +103,7 @@ class StreamingCleanupManager:
             reserved_tokens: Number of tokens reserved for this request
             wrapper: The iterator wrapper (stored as weakref)
         """
-        now = time.time()
+        now = time.monotonic()
         entry = StreamingInFlightEntry(
             reservation_id=reservation_id,
             bucket_id=bucket_id,
@@ -136,7 +136,7 @@ class StreamingCleanupManager:
         async with self._streaming_in_flight_lock:
             entry = self._streaming_in_flight.get(reservation_id)
             if entry:
-                entry.last_activity_at = time.time()
+                entry.last_activity_at = time.monotonic()
 
     async def _cleanup_loop(self) -> None:
         """Background task to clean up stale streaming entries."""
@@ -158,7 +158,7 @@ class StreamingCleanupManager:
         Returns:
             Number of stale entries cleaned up.
         """
-        now = time.time()
+        now = time.monotonic()
         cutoff = now - self._activity_timeout
         stale_entries: list[StreamingInFlightEntry] = []
 

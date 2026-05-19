@@ -470,6 +470,26 @@ class BaseBackend(abc.ABC):
         pass
 
     # ==========================================================================
+    # Lifecycle
+    # ==========================================================================
+
+    async def start(self) -> None:  # noqa: B027  # intentional optional hook
+        """Start any backend background tasks.
+
+        Called by ``StateManager.start()``. The default is a no-op so
+        backends without background work need not implement it; backends
+        that run periodic cleanup (e.g. the in-memory backend) override it.
+        This is deliberately concrete (not abstract) to stay backwards
+        compatible with existing user-supplied backends.
+        """
+
+    async def stop(self) -> None:  # noqa: B027  # intentional optional hook
+        """Stop any backend background tasks started by :meth:`start`.
+
+        Called by ``StateManager.stop()``. The default is a no-op.
+        """
+
+    # ==========================================================================
     # Cleanup and Maintenance
     # ==========================================================================
 

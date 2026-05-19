@@ -215,6 +215,32 @@ class TestIntelligentModeStrategyLoopExceptions:
         assert call_count >= 2  # Recovered and retried
         await strategy.stop()
 
+    @pytest.mark.asyncio
+    async def test_run_scheduling_loop_recovers_from_unlisted_exception(self, strategy):
+        """Loop must survive exceptions outside the historic catch tuple.
+
+        Regression: the loop only caught (AttributeError, ValueError,
+        OSError, TypeError), so a RuntimeError (e.g. "Set changed size
+        during iteration") propagated out and permanently killed the
+        scheduler.
+        """
+        await strategy.start()
+
+        call_count = 0
+
+        async def failing_loop():
+            nonlocal call_count
+            call_count += 1
+            if call_count == 1:
+                raise RuntimeError("Set changed size during iteration")
+            strategy._running = False
+
+        with patch.object(strategy, "_loop_intelligent_mode", side_effect=failing_loop):
+            await strategy.run_scheduling_loop()
+
+        assert call_count >= 2  # Recovered and retried
+        await strategy.stop()
+
 
 # ============================================================================
 # Idle Wait Time Calculation Tests (lines 577-593)

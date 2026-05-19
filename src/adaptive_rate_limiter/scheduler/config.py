@@ -84,6 +84,23 @@ class RateLimiterConfig:
     enable_priority_scheduling: bool = True
     """Enable priority-based request scheduling."""
 
+    # === Retry, Batching & Tracking ===
+
+    max_retries: int = 3
+    """Maximum retry attempts for a failed request (BASIC mode)."""
+
+    batch_size: int = 50
+    """Number of eligible queues processed per scheduler iteration
+    (INTELLIGENT mode)."""
+
+    stale_entry_ttl: float | None = None
+    """TTL in seconds for per-model request-tracking entries (BASIC mode).
+    None disables age-based cleanup of tracking state."""
+
+    max_tracking_entries: int | None = None
+    """Maximum number of per-model request-tracking entries to retain
+    (BASIC mode). None means unbounded."""
+
     # === Rate Limiting Integration ===
 
     enable_rate_limiting: bool = True
@@ -162,6 +179,14 @@ class RateLimiterConfig:
             raise ValueError("max_queue_size must be at least 1")
         if self.overflow_policy not in ("reject", "drop_oldest"):
             raise ValueError("overflow_policy must be 'reject' or 'drop_oldest'")
+        if self.max_retries < 0:
+            raise ValueError("max_retries must be non-negative")
+        if self.batch_size < 1:
+            raise ValueError("batch_size must be at least 1")
+        if self.stale_entry_ttl is not None and self.stale_entry_ttl <= 0:
+            raise ValueError("stale_entry_ttl must be positive when set")
+        if self.max_tracking_entries is not None and self.max_tracking_entries < 1:
+            raise ValueError("max_tracking_entries must be at least 1 when set")
 
 
 @dataclass

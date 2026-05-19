@@ -11,6 +11,7 @@ This module provides:
 - PendingUpdate: Wrapper for pending state updates with retry tracking
 """
 
+from ..types.queue import QueuedRequest, ScheduleResult
 from .base import BaseScheduler, SchedulingStrategy
 from .config import (
     CachePolicy,
@@ -35,9 +36,12 @@ __all__ = [
     "Cache",
     "CachePolicy",
     "PendingUpdate",
+    "QueuedRequest",
     "RateLimitState",
     # Config
     "RateLimiterConfig",
+    # Submit result (INTELLIGENT / ACCOUNT mode return type)
+    "ScheduleResult",
     # Scheduler
     "Scheduler",
     "SchedulerMode",

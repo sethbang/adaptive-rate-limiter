@@ -515,3 +515,32 @@ class TestRecordFailedRequest:
         assert count1 == 1
         assert count2 == 2
         assert count3 == 3
+
+
+class TestStateManagerBackendLifecycle:
+    """Tests that StateManager drives the backend's start/stop lifecycle."""
+
+    @pytest.mark.asyncio
+    async def test_start_starts_backend_cleanup_loop(self):
+        """StateManager.start() must start the backend so its cleanup loop runs.
+
+        Regression: MemoryBackend.start()/stop() were never invoked by the
+        scheduler lifecycle, so its _cleanup_released_reservations loop never
+        ran and _released_reservations grew unbounded.
+        """
+        from adaptive_rate_limiter.backends.memory import MemoryBackend
+
+        backend = MemoryBackend()
+        manager = StateManager(backend=backend)
+        assert backend._cleanup_task is None
+
+        await manager.start()
+        try:
+            assert backend._running is True
+            assert backend._cleanup_task is not None
+            assert not backend._cleanup_task.done()
+        finally:
+            await manager.stop()
+
+        assert backend._running is False
+        assert backend._cleanup_task is None

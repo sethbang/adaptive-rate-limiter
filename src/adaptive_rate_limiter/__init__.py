@@ -80,8 +80,10 @@ from .reservation import (
     ReservationTracker,
 )
 from .scheduler import (
+    QueuedRequest,
     RateLimiterConfig,
     Scheduler,
+    ScheduleResult,
     create_scheduler,
 )
 from .streaming import (
@@ -124,6 +126,7 @@ __all__ = [
     # Providers
     "ProviderInterface",
     "QueueOverflowError",
+    "QueuedRequest",
     "RateLimitInfo",
     "RateLimitedAsyncIterator",
     "RateLimiterConfig",
@@ -137,6 +140,8 @@ __all__ = [
     "ReservationTracker",
     # Resource types
     "ResourceType",
+    # Submit result (INTELLIGENT / ACCOUNT mode return type)
+    "ScheduleResult",
     # Scheduler
     "Scheduler",
     # Streaming
