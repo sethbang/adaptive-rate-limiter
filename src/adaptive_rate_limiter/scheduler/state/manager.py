@@ -94,6 +94,11 @@ class StateManager:
         # Batch processing - using PendingUpdate wrapper for retry tracking
         self._pending_updates: list[PendingUpdate] = []
         self._batch_lock = asyncio.Lock()
+        # Thread lock guarding the _pending_updates list against the
+        # synchronous signal/atexit handler. asyncio.Lock cannot exclude a
+        # signal handler (it runs synchronously, off the loop), so list
+        # mutations are also wrapped in this threading.Lock.
+        self._pending_updates_thread_lock = threading.Lock()
         self._last_batch_time = time.time()
 
         # Reservation management
@@ -256,7 +261,7 @@ class StateManager:
             return
 
         # Get a copy of pending updates under lock
-        with threading.Lock():
+        with self._pending_updates_thread_lock:
             updates = self._pending_updates[:]
             self._pending_updates.clear()
 
@@ -844,7 +849,8 @@ class StateManager:
         pending = PendingUpdate(entry=entry, retry_count=0, last_attempt_time=0.0)
 
         async with self._batch_lock:
-            self._pending_updates.append(pending)
+            with self._pending_updates_thread_lock:
+                self._pending_updates.append(pending)
 
             if (
                 len(self._pending_updates) >= self.config.batch_size
