@@ -38,3 +38,6 @@ docs/architecture
 
 # Claude Code local session/settings dir
 .claude/
+
+# skill-creator benchmark workspaces (build artifacts, not source)
+.claude/skills/*-workspace/
