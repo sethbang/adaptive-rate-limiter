@@ -26,7 +26,7 @@ import threading
 import time
 import uuid
 import weakref
-from collections.abc import Awaitable
+from collections.abc import Awaitable, Coroutine
 from dataclasses import dataclass, field
 from pathlib import Path
 from typing import Any, ClassVar, cast
@@ -374,6 +374,11 @@ class RedisBackend(BaseBackend):
         # Orphan recovery task
         self._orphan_recovery_task: asyncio.Task[None] | None = None
 
+        # Strongly-referenced set of fire-and-forget background tasks. The
+        # event loop only weakly references tasks, so a task with no other
+        # reference can be GC'd mid-run. Tasks remove themselves on completion.
+        self._background_tasks: set[asyncio.Task[Any]] = set()
+
         # Per-model limits cache (in-memory)
         self._model_limits: dict[str, ModelLimits] = {}
         self._model_limits_lock = asyncio.Lock()
@@ -459,7 +464,7 @@ class RedisBackend(BaseBackend):
             if self._event_loop_id and self._event_loop_id != loop_id:
                 old_connection = self._redis
                 if old_connection is not None:
-                    _ = asyncio.create_task(  # noqa: RUF006
+                    self._spawn_background_task(
                         self._cleanup_connection(self._event_loop_id, old_connection)
                     )
                 self._redis = None
@@ -1588,6 +1593,12 @@ class RedisBackend(BaseBackend):
 
     # === Orphan Recovery ===
 
+    def _spawn_background_task(self, coro: Coroutine[Any, Any, Any]) -> None:
+        """Schedule a fire-and-forget task with a retained strong reference."""
+        task = asyncio.create_task(coro)
+        self._background_tasks.add(task)
+        task.add_done_callback(self._background_tasks.discard)
+
     async def start_orphan_recovery(self) -> None:
         """Start the background orphan recovery task."""
         if self._orphan_recovery_task is None or self._orphan_recovery_task.done():
@@ -2031,7 +2042,7 @@ class RedisBackend(BaseBackend):
             await asyncio.sleep(duration)
             await self.clear_failures()
 
-        _ = asyncio.create_task(clear_after_delay())  # noqa: RUF006
+        self._spawn_background_task(clear_after_delay())
 
     async def __aenter__(self) -> "RedisBackend":
         """Async context manager entry."""

@@ -3554,3 +3554,14 @@ class TestRedisBackendCoverageGaps:
         # Test fluent interface: labels().set() and labels().observe()
         noop.labels(test="value").set(1)
         noop.labels(test="value").observe(0.5)
+
+    @pytest.mark.asyncio
+    async def test_force_circuit_break_retains_task_reference(
+        self, backend, mock_redis
+    ):
+        """force_circuit_break's clear task must be strongly referenced, not GC-able."""
+        await backend.force_circuit_break(duration=0.01)
+        assert len(backend._background_tasks) >= 1
+        # The task completes and removes itself via the done-callback.
+        await asyncio.sleep(0.05)
+        assert len(backend._background_tasks) == 0
