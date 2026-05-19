@@ -362,25 +362,6 @@ class BasicModeStrategy(BaseSchedulingModeStrategy):
         # Use base class backoff calculation
         return float(self.scheduler.calculate_backoff(attempt))
 
-    def _is_rate_limit_error(self, error: Exception) -> bool:
-        """
-        Check if an exception is a rate limit error.
-
-        Args:
-            error: The exception to check
-
-        Returns:
-            True if the error represents a 429 rate limit response
-        """
-        # Check common patterns for rate limit errors
-        error_name = type(error).__name__.lower()
-        if "ratelimit" in error_name:
-            return True
-
-        # Check for status_code attribute
-        status_code = getattr(error, "status_code", None)
-        return status_code == 429
-
     def _update_last_request_time(self, model_id: str) -> None:
         """
         Update last request time for a model with LRU eviction and TTL cleanup.

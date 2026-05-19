@@ -68,13 +68,23 @@ class TestScheduler:
 
     @pytest.mark.asyncio
     async def test_scheduler_loop_basic_mode(self, scheduler):
-        """Test that scheduler loop does nothing in BASIC mode."""
+        """Test that scheduler loop delegates to strategy even in BASIC mode."""
         scheduler.mode_strategy = AsyncMock()
 
-        # Should NOT delegate for BASIC mode
+        # BASIC mode must also delegate unconditionally
         scheduler.config.mode = SchedulerMode.BASIC
         await scheduler._scheduler_loop()
-        scheduler.mode_strategy.run_scheduling_loop.assert_not_called()
+        scheduler.mode_strategy.run_scheduling_loop.assert_called_once()
+
+    def test_scheduler_loop_always_delegates_to_strategy(self):
+        """_scheduler_loop must delegate unconditionally, with no mode branch."""
+        import inspect
+
+        from adaptive_rate_limiter.scheduler.scheduler import Scheduler
+
+        src = inspect.getsource(Scheduler._scheduler_loop)
+        assert "SchedulerMode.BASIC" not in src, "facade must not branch on mode"
+        assert "hasattr" not in src, "the always-true hasattr guard must be gone"
 
     def test_get_metrics_combination(self, scheduler):
         """Test combining base metrics with mode metrics."""

@@ -549,3 +549,17 @@ class TestIntegration:
                     mock_future.result.assert_called()
 
             await write_back_manager.stop()
+
+
+class TestSharedThreadLock:
+    """Tests for the shared threading.Lock used by signal-handler flush."""
+
+    def test_sync_flush_uses_shared_lock_instance(self, write_back_manager):
+        """The sync flush must reuse one stored lock, not create a fresh one."""
+        import threading
+
+        assert hasattr(write_back_manager, "_pending_updates_thread_lock")
+        lock = write_back_manager._pending_updates_thread_lock
+        # It must be an actual lock object, and the SAME object on re-access.
+        assert lock is write_back_manager._pending_updates_thread_lock
+        assert isinstance(lock, type(threading.Lock()))

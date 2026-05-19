@@ -41,3 +41,12 @@ class TestScheduleResultIsPublic:
         )
 
         assert ScheduleResult is InternalScheduleResult
+
+
+def test_streaming_inflight_tracker_is_removed():
+    """The dead duplicate class must no longer be importable."""
+    import adaptive_rate_limiter.streaming as streaming_pkg
+
+    assert not hasattr(streaming_pkg, "StreamingInFlightTracker")
+    # The live dataclass must still be importable.
+    assert hasattr(streaming_pkg, "StreamingInFlightEntry")

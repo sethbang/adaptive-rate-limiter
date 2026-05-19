@@ -349,9 +349,11 @@ class TestIntelligentModeStrategyProbeFinish:
             queue_entry_time=datetime.now(timezone.utc),
         )
 
-        # Execute with bucket_id to trigger probe cleanup
+        # Execute with bucket_id and owns_probe=True to trigger probe cleanup.
+        # owns_probe must be True; a bare bucket membership check is no longer
+        # sufficient (see fix for cold-start probe ownership bug).
         await strategy_with_metrics._execute_request_with_tracking(
-            queued_request, "task-1", "bucket-probe"
+            queued_request, "task-1", "bucket-probe", owns_probe=True
         )
 
         # Probe should be cleared

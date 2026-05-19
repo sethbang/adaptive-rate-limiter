@@ -23,6 +23,8 @@ jobs:
 
       - name: Install uv
         uses: astral-sh/setup-uv@v8.1.0
+        with:
+          enable-cache: true
 
       - name: Install dependencies
         run: uv sync --extra dev --extra redis
@@ -46,6 +48,8 @@ jobs:
 
       - name: Install uv
         uses: astral-sh/setup-uv@v8.1.0
+        with:
+          enable-cache: true
 
       - name: Install dependencies (including optional extras for type stubs)
         run: uv sync --extra dev --extra full
@@ -66,6 +70,8 @@ jobs:
 
       - name: Install uv
         uses: astral-sh/setup-uv@v8.1.0
+        with:
+          enable-cache: true
 
       - name: Install dependencies
         run: uv sync --extra dev
@@ -98,6 +104,8 @@ jobs:
 
       - name: Install uv
         uses: astral-sh/setup-uv@v8.1.0
+        with:
+          enable-cache: true
 
       - name: Build wheel
         run: uv build --wheel
@@ -157,6 +165,8 @@ jobs:
 
       - name: Install uv
         uses: astral-sh/setup-uv@v8.1.0
+        with:
+          enable-cache: true
 
       - name: Install dependencies
         run: uv sync --extra dev --extra redis
@@ -176,5 +186,54 @@ jobs:
           files: ./coverage.xml
           flags: unittests-py${{ matrix.python-version }}-${{ matrix.os }}
           name: codecov-py${{ matrix.python-version }}-${{ matrix.os }}
+          fail_ci_if_error: false
+          verbose: true
+
+  test-redis-integration:
+    name: Integration Tests (Real Redis, Python ${{ matrix.python-version }})
+    runs-on: ubuntu-latest
+    needs: [lint]
+    strategy:
+      fail-fast: false
+      matrix:
+        python-version: ["3.10", "3.11", "3.12", "3.13"]
+    services:
+      redis:
+        image: redis:7.4-alpine
+        ports:
+          - 6379:6379
+        options: >-
+          --health-cmd "redis-cli ping"
+          --health-interval 10s
+          --health-timeout 5s
+          --health-retries 5
+    steps:
+      - uses: actions/checkout@v6
+
+      - name: Set up Python ${{ matrix.python-version }}
+        uses: actions/setup-python@v6
+        with:
+          python-version: ${{ matrix.python-version }}
+
+      - name: Install uv
+        uses: astral-sh/setup-uv@v8.1.0
+        with:
+          enable-cache: true
+
+      - name: Install dependencies
+        run: uv sync --extra dev --extra redis
+
+      - name: Run full test suite against real Redis
+        env:
+          REDIS_URL: redis://localhost:6379
+        run: uv run pytest --cov=src/adaptive_rate_limiter --cov-report=xml --cov-report=term-missing
+
+      - name: Upload coverage to Codecov
+        uses: codecov/codecov-action@v6
+        with:
+          token: ${{ secrets.CODECOV_TOKEN }}
+          files: ./coverage.xml
+          flags: redis-integration-py${{ matrix.python-version }}
+          name: codecov-redis-integration-py${{ matrix.python-version }}
           fail_ci_if_error: false
           verbose: true

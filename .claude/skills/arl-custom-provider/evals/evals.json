@@ -52,6 +52,17 @@
         "States that discover_limits must return DiscoveredBucket objects (dict[str, DiscoveredBucket]), not RateLimitBucket",
         "Notes that RateLimitBucket and the internal types module are not part of the public API and should not be relied on"
       ]
+    },
+    {
+      "id": 6,
+      "prompt": "My custom adaptive-rate-limiter provider's discover_limits() calls an upstream API that intermittently returns HTTP 503. When that happens I want to raise an exception. Is BackendConnectionError the right one to raise, or is there a provider-specific exception?",
+      "expected_output": "Recommends raising ProviderError (from adaptive_rate_limiter) for provider-side failures, not BackendConnectionError.",
+      "files": [],
+      "expectations": [
+        "Recommends raising ProviderError (importable from adaptive_rate_limiter) when a provider method fails, such as an upstream discovery API returning 503",
+        "States that BackendConnectionError is not appropriate here because it is for storage-backend (Redis/memory) failures, not provider failures",
+        "Shows how to raise ProviderError from within a provider method, e.g. checking the upstream response status and raising on a 503"
+      ]
     }
   ]
 }

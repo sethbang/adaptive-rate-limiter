@@ -145,6 +145,25 @@ class BackendOperationError(RateLimiterError):
     pass
 
 
+class ProviderError(RateLimiterError):
+    """Raised when a provider fails to discover or parse rate-limit data.
+
+    Custom :class:`~adaptive_rate_limiter.providers.base.ProviderInterface`
+    implementations should raise this (or a subclass) when ``discover_limits``,
+    ``parse_rate_limit_response``, or ``get_bucket_for_model`` cannot complete
+    — for example, when an upstream discovery API returns an error response.
+
+    Example:
+        class MyProvider(ProviderInterface):
+            async def discover_limits(self, model_id, resource_type):
+                resp = await self._client.get(...)
+                if resp.status_code >= 400:
+                    raise ProviderError(f"discovery failed: {resp.status_code}")
+    """
+
+    pass
+
+
 class ConfigurationError(RateLimiterError):
     """Raised when configuration is invalid.
 

@@ -198,3 +198,17 @@ class TestDirectVsLazyImportEquivalence:
         )
 
         assert LazyFallbackRateLimiter is DirectFallbackRateLimiter
+
+
+def test_lazy_names_are_discoverable_via_dir():
+    import adaptive_rate_limiter
+    import adaptive_rate_limiter.backends as backends
+
+    assert "RedisBackend" in dir(adaptive_rate_limiter)
+    for name in (
+        "RedisBackend",
+        "FallbackRateLimiter",
+        "InFlightRequest",
+        "ModelLimits",
+    ):
+        assert name in dir(backends), name

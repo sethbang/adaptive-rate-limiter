@@ -86,13 +86,42 @@ jobs:
           echo "✅ Version verified: $VERSION"
 
       - name: Run linting
-        run: uv run ruff check .
+        run: uv run ruff check src/ tests/
+
+      - name: Check formatting
+        run: uv run ruff format --check src/ tests/
 
       - name: Run type checking
         run: uv run mypy src/
 
-      - name: Run unit tests
-        run: uv run pytest tests/unit -v --tb=short
+      - name: Run security scan (bandit)
+        run: uv run bandit -r src/
+
+      - name: Export runtime dependency manifest
+        run: |
+          uv export --no-dev --extra redis --extra metrics \
+            --format requirements-txt --no-emit-project --no-hashes \
+            > runtime-requirements.txt
+
+      - name: Run pip-audit on runtime dependencies
+        run: uv run pip-audit --no-deps --disable-pip -r runtime-requirements.txt
+
+      - name: Build wheel for Lua packaging verification
+        run: uv build --wheel
+
+      - name: Verify Lua scripts are packaged in the wheel
+        run: |
+          WHEEL=$(ls dist/*.whl)
+          echo "Inspecting $WHEEL"
+          LUA_COUNT=$(unzip -l "$WHEEL" | grep -c '\.lua$' || true)
+          echo "Lua files in wheel: $LUA_COUNT"
+          if [ "$LUA_COUNT" -ne 6 ]; then
+            echo "::error::Expected 6 Lua scripts in the wheel, found $LUA_COUNT"
+            exit 1
+          fi
+
+      - name: Run full test suite
+        run: uv run pytest --cov=src/adaptive_rate_limiter --cov-report=term-missing
 
   # ===========================================================================
   # Build Job - Build the package

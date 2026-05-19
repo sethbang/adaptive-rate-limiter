@@ -245,8 +245,11 @@ class TestBaseScheduler:
 
     def test_calculate_backoff(self, scheduler):
         """Test exponential backoff calculation."""
-        # Mock time to control jitter
-        with patch("time.time", return_value=0.0):
+        # Patch random.random to return 0.0 so jitter term vanishes and
+        # we can assert exact exponential values.
+        with patch(
+            "adaptive_rate_limiter.scheduler.base.random.random", return_value=0.0
+        ):
             delay_0 = scheduler.calculate_backoff(0, base_delay=1.0)
             assert delay_0 == 1.0
 
@@ -259,9 +262,17 @@ class TestBaseScheduler:
     def test_calculate_backoff_max_cap(self, scheduler):
         """Test backoff max cap."""
         scheduler.config.max_backoff = 10.0
-        with patch("time.time", return_value=0.0):
+        with patch(
+            "adaptive_rate_limiter.scheduler.base.random.random", return_value=0.0
+        ):
             delay = scheduler.calculate_backoff(10, base_delay=1.0)
             assert delay == 10.0
+
+    def test_backoff_jitter_is_randomized(self, scheduler):
+        """Two backoff calls at the same attempt must differ (real jitter)."""
+        delays = {scheduler.calculate_backoff(3) for _ in range(50)}
+        # With a real RNG, 50 draws produce many distinct values.
+        assert len(delays) > 5
 
     def test_extract_response_headers_pydantic_private(self, scheduler):
         """Test extracting headers from pydantic private attribute."""
@@ -648,7 +659,9 @@ class TestBaseSchedulerCoverageExpansion:
     # ===== Line 407: Backoff Default Delay =====
     def test_calculate_backoff_default_delay(self, scheduler):
         """Test backoff with no base_delay provided."""
-        with patch("time.time", return_value=0.0):
+        with patch(
+            "adaptive_rate_limiter.scheduler.base.random.random", return_value=0.0
+        ):
             delay = scheduler.calculate_backoff(0)  # No base_delay arg
             assert delay == 1.0  # Uses default 1.0
 

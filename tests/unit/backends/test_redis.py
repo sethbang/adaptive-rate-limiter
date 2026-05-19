@@ -323,16 +323,19 @@ class TestRedisBackend:
     async def test_get_all_states(self, backend, mock_redis):
         """Test get_all_states uses SCAN instead of KEYS."""
         # Mock SCAN to return keys in one iteration
-        mock_redis.scan.return_value = (0, ["rl:hash:state"])
+        mock_redis.scan.return_value = (0, ["rl:hash:rlstate"])
         mock_redis.hgetall.return_value = {"key": "value"}
 
         states = await backend.get_all_states()
         assert len(states) == 1
-        assert "rl:hash:state" in states
+        assert "rl:hash:rlstate" in states
 
-        # Verify SCAN was used instead of KEYS
+        # Verify SCAN was used instead of KEYS, with the rlstate pattern
         mock_redis.scan.assert_called()
         mock_redis.keys.assert_not_called()
+        # Verify scan uses the correct rlstate pattern
+        scan_call_kwargs = mock_redis.scan.call_args
+        assert scan_call_kwargs.kwargs.get("match") == "rl:*:rlstate"
 
     @pytest.mark.asyncio
     async def test_check_capacity(self, backend, mock_redis):
@@ -890,6 +893,19 @@ class TestRedisBackend:
         assert state == {"key": "value"}
 
     @pytest.mark.asyncio
+    async def test_get_state_reads_kv_state_key(self, backend, mock_redis):
+        """get_state must read from the ':rlstate' KV snapshot key, not the Lua hash."""
+        mock_redis.hgetall.return_value = {"remaining_requests": "50"}
+
+        await backend.get_state("gpt-4")
+
+        # hgetall must have been called with the rlstate key, not the Lua hash
+        called_key = mock_redis.hgetall.call_args.args[0]
+        assert called_key == backend._get_kv_state_key("gpt-4")
+        assert called_key.endswith(":rlstate")
+        assert called_key != backend._get_state_key("gpt-4")
+
+    @pytest.mark.asyncio
     async def test_set_state(self, backend, mock_redis):
         """Test set_state."""
         await backend.set_state("model-1", {"key": "value"})
@@ -897,11 +913,44 @@ class TestRedisBackend:
         mock_redis.expire.assert_called_once()
 
     @pytest.mark.asyncio
+    async def test_kv_state_uses_separate_key_from_lua_hash(self, backend, mock_redis):
+        """set_state/get_state must NOT target the Lua-owned 'rl:{tag}:state' key."""
+        lua_hash_key = backend._get_state_key("gpt-4")
+
+        await backend.set_state("gpt-4", {"remaining_requests": 100})
+
+        # set_state must have written to the rlstate key, never the Lua hash.
+        written_key = mock_redis.hset.call_args.args[0]
+        assert written_key != lua_hash_key
+        assert written_key.endswith(":rlstate")
+        assert backend._get_kv_state_key("gpt-4") == written_key
+
+    @pytest.mark.asyncio
     async def test_clear(self, backend, mock_redis):
         """Test clear."""
         mock_redis.scan.side_effect = [(0, ["key1", "key2"])]
         await backend.clear()
         mock_redis.delete.assert_called_with("key1", "key2")
+
+    @pytest.mark.asyncio
+    async def test_start_launches_orphan_recovery(self, backend, mock_redis):
+        """start() must launch the orphan recovery loop (not the inherited no-op)."""
+        assert backend._orphan_recovery_task is None
+        await backend.start()
+        try:
+            assert backend._orphan_recovery_task is not None
+            assert not backend._orphan_recovery_task.done()
+        finally:
+            await backend.stop()
+
+    @pytest.mark.asyncio
+    async def test_stop_cancels_orphan_recovery(self, backend, mock_redis):
+        """stop() must cancel the orphan recovery loop started by start()."""
+        await backend.start()
+        task = backend._orphan_recovery_task
+        await backend.stop()
+        assert task is not None
+        assert task.done()
 
 
 class TestRedisBackendExtras:
@@ -1667,6 +1716,28 @@ class TestRedisBackendCoverageExpansion:
         limits = await backend.get_rate_limits("model-1")
         assert limits == {}
 
+    @pytest.mark.asyncio
+    async def test_get_rate_limits_reads_lua_hash_not_rlstate(
+        self, backend, mock_redis
+    ):
+        """get_rate_limits must read from the Lua-owned ':state' hash, not ':rlstate'."""
+        mock_redis.hgetall.return_value = {
+            "lim_req": "100",
+            "rem_req": "80",
+            "rst_req": "0",
+            "lim_tok": "5000",
+            "rem_tok": "4000",
+            "rst_tok": "0",
+        }
+
+        await backend.get_rate_limits("gpt-4")
+
+        # hgetall must have been called with the Lua hash key, not the rlstate key
+        called_key = mock_redis.hgetall.call_args.args[0]
+        assert called_key == backend._get_state_key("gpt-4")
+        assert called_key.endswith(":state")
+        assert not called_key.endswith(":rlstate")
+
     # === Test Check Capacity When Circuit Broken (Lines 1370-1371) ===
     @pytest.mark.asyncio
     async def test_check_capacity_circuit_broken(self, backend, mock_redis):
@@ -2003,7 +2074,7 @@ class TestRedisBackendCoverageExpansion:
     async def test_get_all_states_multiple_keys(self, backend, mock_redis):
         """Test get_all_states with multiple keys using SCAN."""
         # SCAN returns all keys in one iteration (cursor 0 = done)
-        mock_redis.scan.return_value = (0, ["rl:h1:state", "rl:h2:state"])
+        mock_redis.scan.return_value = (0, ["rl:h1:rlstate", "rl:h2:rlstate"])
         mock_redis.hgetall.side_effect = [
             {"rem_req": "10", "lim_req": "100"},
             {"rem_tok": "500", "lim_tok": "1000"},
@@ -2011,17 +2082,20 @@ class TestRedisBackendCoverageExpansion:
 
         states = await backend.get_all_states()
         assert len(states) == 2
-        assert "rl:h1:state" in states
-        assert "rl:h2:state" in states
+        assert "rl:h1:rlstate" in states
+        assert "rl:h2:rlstate" in states
         mock_redis.scan.assert_called()
+        # Verify scan uses the correct rlstate pattern
+        scan_call_kwargs = mock_redis.scan.call_args
+        assert scan_call_kwargs.kwargs.get("match") == "rl:*:rlstate"
 
     @pytest.mark.asyncio
     async def test_get_all_states_multiple_scan_iterations(self, backend, mock_redis):
         """Test get_all_states with multiple SCAN iterations."""
         # First scan returns cursor != 0, second scan returns cursor == 0
         mock_redis.scan.side_effect = [
-            (100, ["rl:h1:state"]),  # cursor != 0, continue
-            (0, ["rl:h2:state"]),  # cursor == 0, done
+            (100, ["rl:h1:rlstate"]),  # cursor != 0, continue
+            (0, ["rl:h2:rlstate"]),  # cursor == 0, done
         ]
         mock_redis.hgetall.side_effect = [
             {"rem_req": "10", "lim_req": "100"},
@@ -2030,8 +2104,8 @@ class TestRedisBackendCoverageExpansion:
 
         states = await backend.get_all_states()
         assert len(states) == 2
-        assert "rl:h1:state" in states
-        assert "rl:h2:state" in states
+        assert "rl:h1:rlstate" in states
+        assert "rl:h2:rlstate" in states
         # Should have called scan twice
         assert mock_redis.scan.call_count == 2
 
@@ -2048,10 +2122,13 @@ class TestRedisBackendCoverageExpansion:
             backend._redis = mock_redis
             backend._connected = True
 
-            # Mock scan_iter to yield keys
+            # Track the pattern argument passed to scan_iter
+            scan_iter_calls: list[str] = []
+
             async def mock_scan_iter(match, count):
-                yield "rl:h1:state"
-                yield "rl:h2:state"
+                scan_iter_calls.append(match)
+                yield "rl:h1:rlstate"
+                yield "rl:h2:rlstate"
 
             mock_redis.scan_iter = mock_scan_iter
             mock_redis.hgetall.side_effect = [
@@ -2061,13 +2138,15 @@ class TestRedisBackendCoverageExpansion:
 
             states = await backend.get_all_states()
             assert len(states) == 2
-            assert "rl:h1:state" in states
-            assert "rl:h2:state" in states
+            assert "rl:h1:rlstate" in states
+            assert "rl:h2:rlstate" in states
+            # Verify scan_iter uses the correct rlstate pattern
+            assert scan_iter_calls == ["rl:*:rlstate"]
 
     @pytest.mark.asyncio
     async def test_get_all_states_empty_state_skipped(self, backend, mock_redis):
         """Test get_all_states skips keys with empty state."""
-        mock_redis.scan.return_value = (0, ["rl:h1:state", "rl:h2:state"])
+        mock_redis.scan.return_value = (0, ["rl:h1:rlstate", "rl:h2:rlstate"])
         mock_redis.hgetall.side_effect = [
             {"rem_req": "10"},  # Has data
             {},  # Empty - should be skipped
@@ -2075,8 +2154,8 @@ class TestRedisBackendCoverageExpansion:
 
         states = await backend.get_all_states()
         assert len(states) == 1
-        assert "rl:h1:state" in states
-        assert "rl:h2:state" not in states
+        assert "rl:h1:rlstate" in states
+        assert "rl:h2:rlstate" not in states
 
     # === Test Execute Update With Tracking CancelledError (Line 913) ===
     @pytest.mark.asyncio
@@ -2814,8 +2893,8 @@ class TestRedisBackendCoverageGaps:
 
         # Mock scan_iter to yield keys
         async def mock_scan_iter(match, count):
-            yield "rl:h1:state"
-            yield "rl:h2:state"
+            yield "rl:h1:rlstate"
+            yield "rl:h2:rlstate"
 
         mock_redis.scan_iter = mock_scan_iter
         # Return empty dict for one key (should be skipped)
@@ -2826,8 +2905,8 @@ class TestRedisBackendCoverageGaps:
 
         states = await backend.get_all_states()
         assert len(states) == 1
-        assert "rl:h1:state" in states
-        assert "rl:h2:state" not in states
+        assert "rl:h1:rlstate" in states
+        assert "rl:h2:rlstate" not in states
 
     # === Line 1463->exit: clear() cluster mode with remaining keys ===
     @pytest.mark.asyncio
@@ -3475,3 +3554,14 @@ class TestRedisBackendCoverageGaps:
         # Test fluent interface: labels().set() and labels().observe()
         noop.labels(test="value").set(1)
         noop.labels(test="value").observe(0.5)
+
+    @pytest.mark.asyncio
+    async def test_force_circuit_break_retains_task_reference(
+        self, backend, mock_redis
+    ):
+        """force_circuit_break's clear task must be strongly referenced, not GC-able."""
+        await backend.force_circuit_break(duration=0.01)
+        assert len(backend._background_tasks) >= 1
+        # The task completes and removes itself via the done-callback.
+        await asyncio.sleep(0.05)
+        assert len(backend._background_tasks) == 0

@@ -160,6 +160,15 @@ class RateLimitedAsyncIterator(AsyncIterator[T], Generic[T]):
             await self._release_capacity()
             raise
 
+        except (asyncio.CancelledError, GeneratorExit):
+            # Cancellation/GeneratorExit are BaseException, not Exception, so
+            # they bypass the handler below. Release with the conservative
+            # fallback (refund=0) before re-raising so capacity is not leaked
+            # until background stale cleanup. _release_capacity_fallback
+            # shields its backend call, so it is safe to await here.
+            await self._release_capacity_fallback()
+            raise
+
         except Exception as e:
             # Error path - release with fallback (refund=0)
             logger.warning(

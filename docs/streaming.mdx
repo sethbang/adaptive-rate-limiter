@@ -47,7 +47,6 @@ from adaptive_rate_limiter.streaming import (
     StreamingReservationContext,
     RateLimitedAsyncIterator,
     StreamingInFlightEntry,
-    StreamingInFlightTracker,
 )
 ```
 
@@ -86,9 +85,9 @@ ErrorMetricsCallback = Callable[[Optional[str]], None]
 
 The [`RateLimitedAsyncIterator`](https://github.com/sethbang/adaptive-rate-limiter/blob/main/src/adaptive_rate_limiter/streaming/iterator.py) wraps the async iterator returned by your HTTP client. It intercepts the stream iteration to handle rate limit logic transparently.
 
-### StreamingInFlightTracker
+### Abandoned Stream Cleanup
 
-The [`StreamingInFlightTracker`](https://github.com/sethbang/adaptive-rate-limiter/blob/main/src/adaptive_rate_limiter/streaming/tracker.py) runs a background cleanup task that releases capacity for hung or abandoned streams after a configurable timeout (default: 5 minutes via `StateConfig.reservation_ttl`). This prevents capacity leaks when streams fail unexpectedly.
+Stale and abandoned stream cleanup is handled automatically by intelligent mode's internal cleanup manager — there is no class to import or instantiate. When a stream has been inactive beyond the configured timeout (default: 5 minutes via `StateConfig.reservation_ttl`), the scheduler reclaims its reservation and returns the capacity to the pool. This prevents capacity leaks when streams fail unexpectedly or are abandoned.
 
 ### StreamingResponseProtocol
 
@@ -122,6 +121,10 @@ If the stream fails or if token usage information cannot be extracted from the r
 - Refund is 0.
 
 This prevents accidental over-consumption by assuming the worst-case scenario (that the request used the full reservation).
+
+### Task Cancellation Safety
+
+Task cancellation mid-stream is safe. `RateLimitedAsyncIterator.__anext__` catches both `asyncio.CancelledError` and `GeneratorExit`, releases the reservation using the conservative zero-refund fallback, and re-raises the exception. This means wrapping a streaming call in `asyncio.wait_for()` or `asyncio.timeout()` will not leak capacity — the reservation is always released even if the task is cancelled before the stream finishes.
 
 ## Usage
 
@@ -286,14 +289,6 @@ A dataclass representing an in-flight streaming request entry.
 from adaptive_rate_limiter.streaming import StreamingInFlightEntry
 ```
 
-### StreamingInFlightTracker
-
-Tracks streaming requests that are currently in progress. Used internally by the scheduler.
-
-```python
-from adaptive_rate_limiter.streaming import StreamingInFlightTracker
-```
-
 <Note>
 These types are primarily used internally by `IntelligentModeStrategy`. Most users should use `StreamingReservationContext` for streaming support.
 </Note>
@@ -314,11 +309,11 @@ These types are primarily used internally by `IntelligentModeStrategy`. Most use
 If you're not seeing refunds:
 - Ensure `stream_options.include_usage=True` is set in your API call
 - Verify the final chunk contains `usage.total_tokens`
-- Check that the stream completes normally (not cancelled or errored)
+- Note that cancellations and exceptions now release capacity automatically (with zero refund); only an early `break` without calling `aclose()` can leak — let the stream complete or call `aclose()` on early break
 
 ### Capacity Leaks
 
 If capacity isn't being released:
-- The `StreamingInFlightTracker` will clean up stale streams after the configured timeout (default: 5 minutes)
+- The scheduler's internal cleanup automatically releases stale streams after the configured timeout (default: 5 minutes via `StateConfig.reservation_ttl`)
 - Ensure you're consuming the entire stream (not abandoning it mid-stream)
 - Check logs for cleanup activity

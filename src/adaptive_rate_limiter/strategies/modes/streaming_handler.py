@@ -153,7 +153,10 @@ class StreamingHandler:
         ) -> None:
             """Callback invoked when streaming completes successfully."""
             self._streaming_metrics.record_completion(
-                reserved, actual, extraction_succeeded
+                reserved,
+                actual,
+                extraction_succeeded,
+                bucket_id=bucket_id,
             )
 
         def on_error(bucket_id: str | None) -> None:

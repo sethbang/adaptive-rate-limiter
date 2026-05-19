@@ -15,7 +15,7 @@ A provider implements the `ProviderInterface` to handle API-specific logic. The 
 |------|-------------------|---------------------|
 | **BASIC** | ❌ Optional | ❌ Optional |
 | **INTELLIGENT** | ✅ Required | ✅ Required |
-| **ACCOUNT** | ✅ Required | ✅ Required |
+| **ACCOUNT** | ❌ Optional | ❌ Optional |
 
 ## Built-in Types
 
@@ -111,7 +111,10 @@ class MyProvider(ProviderInterface):
         Returns:
             Dictionary mapping bucket IDs to DiscoveredBucket objects
         """
-        # Return known buckets (or fetch from API if it provides a limits endpoint)
+        # Return known buckets (or fetch from API if it provides a limits endpoint).
+        # If the API has no discovery endpoint, return {} rather than raising.
+        # Raise ProviderError (not BackendConnectionError) if the discovery call
+        # itself fails — e.g. the endpoint returns 4xx/5xx.
         return {
             "gpt-5": DiscoveredBucket(
                 bucket_id="gpt-5",
@@ -168,6 +171,31 @@ class MyProvider(ProviderInterface):
         # Simple case: model_id is the bucket ID
         return model_id
 ```
+
+### Error handling in providers
+
+When a provider method cannot complete — for example, an upstream discovery API returns a 4xx or 5xx response — raise `ProviderError` (imported from `adaptive_rate_limiter`):
+
+```python
+from adaptive_rate_limiter import ProviderInterface, DiscoveredBucket, ProviderError
+
+class MyProvider(ProviderInterface):
+    async def discover_limits(
+        self, force_refresh: bool = False, timeout: float = 30.0
+    ) -> dict[str, DiscoveredBucket]:
+        resp = await self._http_client.get("/rate-limits", timeout=timeout)
+        if resp.status_code >= 400:
+            raise ProviderError(
+                f"discover_limits failed: HTTP {resp.status_code}"
+            )
+        return self._parse_response(resp.json())
+```
+
+<Note>
+**`ProviderError` vs `BackendConnectionError`**: raise `ProviderError` from `discover_limits`, `parse_rate_limit_response`, and `get_bucket_for_model` when the provider itself fails. `BackendConnectionError` is reserved for storage-backend failures (Redis, in-memory) — do not raise it from provider code.
+
+If your API simply has no discovery endpoint, return `{}` from `discover_limits` rather than raising.
+</Note>
 
 ### Minimal Implementation
 

@@ -17,6 +17,7 @@ from adaptive_rate_limiter import (
     ReservationCapacityError,
     BackendConnectionError,
     BackendOperationError,
+    ProviderError,
     ConfigurationError,
     QueueOverflowError,
     TooManyFailedRequestsError,
@@ -35,6 +36,7 @@ Exception
     ├── ReservationCapacityError       # Reservation tracker at capacity
     ├── BackendConnectionError         # Backend connection failures
     ├── BackendOperationError          # Backend operation failures
+    ├── ProviderError                  # Provider discover/parse failures
     ├── ConfigurationError             # Invalid configuration
     ├── QueueOverflowError             # Queue full
     └── TooManyFailedRequestsError     # Circuit breaker tripped
@@ -121,6 +123,42 @@ Raised when the backend (e.g., Redis) cannot be reached. Handle this to implemen
 ### `BackendOperationError`
 
 Raised when a backend operation fails (e.g., Redis command error, serialization failure).
+
+### `ProviderError`
+
+Raised by custom `ProviderInterface` implementations when `discover_limits`, `parse_rate_limit_response`, or `get_bucket_for_model` cannot complete — for example, when an upstream discovery API returns a 4xx or 5xx response.
+
+<Note>
+`ProviderError` is distinct from `BackendConnectionError`, which is reserved for storage-backend failures (Redis, in-memory). Use `ProviderError` in provider code; use `BackendConnectionError` for backend infrastructure issues.
+</Note>
+
+**Usage (in a custom provider):**
+```python
+from adaptive_rate_limiter import ProviderError
+
+class MyProvider(ProviderInterface):
+    async def discover_limits(
+        self, force_refresh: bool = False, timeout: float = 30.0
+    ) -> dict[str, DiscoveredBucket]:
+        resp = await self._client.get("/limits", timeout=timeout)
+        if resp.status_code >= 400:
+            raise ProviderError(
+                f"discover_limits failed: HTTP {resp.status_code}"
+            )
+        return self._parse_discovery_response(resp.json())
+```
+
+**Handling:**
+```python
+from adaptive_rate_limiter import ProviderError
+
+try:
+    result = await scheduler.submit_request(metadata, request_func)
+except ProviderError as e:
+    logger.error(f"Provider error: {e}")
+    # Check provider configuration or upstream API availability
+    raise
+```
 
 ### `ConfigurationError`
 

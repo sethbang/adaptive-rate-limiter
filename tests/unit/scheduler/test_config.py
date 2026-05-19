@@ -178,6 +178,31 @@ class TestRateLimiterConfig:
         with pytest.raises(ValueError, match="overflow_policy"):
             RateLimiterConfig(overflow_policy="")
 
+    @pytest.mark.parametrize(
+        "field,bad_value",
+        [
+            ("request_timeout", 0.0),
+            ("request_timeout", -1.0),
+            ("scheduler_interval", 0.0),
+            ("backoff_base", 1.0),
+            ("max_backoff", 0.0),
+            ("failure_window", 0.0),
+            ("max_failures", 0),
+            ("health_check_interval", 0.0),
+            ("max_consecutive_failures", 0),
+            ("metrics_export_interval", 0.0),
+            ("prometheus_port", 0),
+            ("prometheus_port", 70000),
+            ("test_rate_multiplier", 0.0),
+        ],
+    )
+    def test_invalid_numeric_fields_raise_value_error(self, field, bad_value):
+        with pytest.raises(ValueError):
+            RateLimiterConfig(**{field: bad_value})
+
+    def test_valid_config_still_constructs(self):
+        RateLimiterConfig()  # all defaults must remain valid
+
 
 class TestStateConfig:
     def test_default_values(self):

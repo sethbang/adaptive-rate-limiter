@@ -94,6 +94,11 @@ class StateManager:
         # Batch processing - using PendingUpdate wrapper for retry tracking
         self._pending_updates: list[PendingUpdate] = []
         self._batch_lock = asyncio.Lock()
+        # Thread lock guarding the _pending_updates list against the
+        # synchronous signal/atexit handler. asyncio.Lock cannot exclude a
+        # signal handler (it runs synchronously, off the loop), so list
+        # mutations are also wrapped in this threading.Lock.
+        self._pending_updates_thread_lock = threading.Lock()
         self._last_batch_time = time.time()
 
         # Reservation management
@@ -252,11 +257,11 @@ class StateManager:
         For running event loops, uses asyncio.run_coroutine_threadsafe() with a timeout
         to block until writes complete, ensuring data is flushed before signal handler exits.
         """
-        if not self._pending_updates:
-            return
-
-        # Get a copy of pending updates under lock
-        with threading.Lock():
+        # Get a copy of pending updates under lock; the empty-check is inside
+        # the lock so we never read _pending_updates outside of it.
+        with self._pending_updates_thread_lock:
+            if not self._pending_updates:
+                return
             updates = self._pending_updates[:]
             self._pending_updates.clear()
 
@@ -534,7 +539,9 @@ class StateManager:
                 bucket_id, request_count, token_count or 0, bucket_limits=bucket_limits
             )
 
-            # Sync cache with backend
+            # Sync cache with the persisted RateLimitState snapshot (may be
+            # empty before any headers have been observed; live capacity is
+            # owned by the atomic Lua hash).
             backend_state = await self.backend.get_state(bucket_id)
             if backend_state:
                 try:
@@ -842,7 +849,8 @@ class StateManager:
         pending = PendingUpdate(entry=entry, retry_count=0, last_attempt_time=0.0)
 
         async with self._batch_lock:
-            self._pending_updates.append(pending)
+            with self._pending_updates_thread_lock:
+                self._pending_updates.append(pending)
 
             if (
                 len(self._pending_updates) >= self.config.batch_size
@@ -939,11 +947,11 @@ class StateManager:
         Updates that exceed the max retry limit are dropped and logged as errors.
         """
         async with self._batch_lock:
-            if not self._pending_updates:
-                return
-
-            updates = self._pending_updates[:]
-            self._pending_updates.clear()
+            with self._pending_updates_thread_lock:
+                if not self._pending_updates:
+                    return
+                updates = self._pending_updates[:]
+                self._pending_updates.clear()
             self._last_batch_time = time.time()
 
         current_time = time.time()
@@ -1004,7 +1012,8 @@ class StateManager:
         if failed_updates:
             async with self._batch_lock:
                 # Prepend to give them priority on next flush
-                self._pending_updates = failed_updates + self._pending_updates
+                with self._pending_updates_thread_lock:
+                    self._pending_updates = failed_updates + self._pending_updates
             logger.warning(
                 f"Re-queued {len(failed_updates)} state update(s) for retry "
                 f"(max retries: {self.config.flush_max_retries})"

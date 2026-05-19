@@ -6,6 +6,7 @@ Unified BaseScheduler abstract class for Adaptive Rate Limiter.
 
 import asyncio
 import logging
+import random
 import time
 from abc import ABC, abstractmethod
 from collections import defaultdict
@@ -507,7 +508,7 @@ class BaseScheduler(ABC):
         delay = min(delay, max_backoff)
 
         # Add small jitter to prevent thundering herd
-        jitter = delay * BACKOFF_JITTER_FACTOR * (time.time() % 1)
+        jitter = delay * BACKOFF_JITTER_FACTOR * random.random()  # noqa: S311  # nosec B311
         delay += jitter
 
         logger.debug(f"Calculated backoff for attempt {attempt}: {delay:.2f}s")

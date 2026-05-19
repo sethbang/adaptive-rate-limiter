@@ -261,3 +261,18 @@ class TestAbstractMethodEnforcement:
         with pytest.raises(TypeError) as exc_info:
             IncompleteStrategy(Mock(), Mock(), Mock())  # type: ignore
         assert "get_metrics" in str(exc_info.value)
+
+
+def test_is_rate_limit_error_is_defined_on_base():
+    """The helper must live on the shared base class, not be duplicated."""
+    assert "_is_rate_limit_error" in vars(BaseSchedulingModeStrategy)
+
+
+def test_basic_and_intelligent_do_not_redefine_is_rate_limit_error():
+    from adaptive_rate_limiter.strategies.modes.basic import BasicModeStrategy
+    from adaptive_rate_limiter.strategies.modes.intelligent import (
+        IntelligentModeStrategy,
+    )
+
+    assert "_is_rate_limit_error" not in vars(BasicModeStrategy)
+    assert "_is_rate_limit_error" not in vars(IntelligentModeStrategy)

@@ -239,6 +239,14 @@ class TestTooManyFailedRequestsError:
         assert str(error) == "Too many failed requests"
 
 
+def test_provider_error_exists_and_is_rate_limiter_error():
+    from adaptive_rate_limiter import ProviderError, RateLimiterError
+
+    assert issubclass(ProviderError, RateLimiterError)
+    err = ProviderError("discovery failed")
+    assert str(err) == "discovery failed"
+
+
 class TestExceptionHierarchy:
     """Tests for the exception inheritance hierarchy."""
 

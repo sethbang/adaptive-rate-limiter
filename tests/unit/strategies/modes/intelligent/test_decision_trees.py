@@ -641,11 +641,21 @@ class TestCapacityCheckFailureRetryDecisions:
     async def test_failure_clears_probe_flag_on_reservation_failure(
         self, strategy, metadata, mock_state_manager, setup_queue_with_request
     ):
-        """Lines 867-868: Clear probe flag when reservation fails."""
+        """Probe flag is cleared when the OWNING request's reservation fails.
+
+        The probe slot is acquired via _try_acquire_probe (owns_probe=True) and
+        must be released when the capacity check fails — so other coroutines
+        can make forward progress.  The state must be unverified so the probe
+        acquisition path is triggered.
+        """
         await setup_queue_with_request()
 
-        # Mark bucket as being probed
-        strategy._bucket_probes.add("bucket-1")
+        # State must be unverified to trigger probe acquisition
+        state = Mock()
+        state.is_verified = False
+        state.remaining_requests = 0
+        state.reset_at = None
+        mock_state_manager.get_state.return_value = state
 
         with patch.object(
             strategy,
@@ -653,17 +663,12 @@ class TestCapacityCheckFailureRetryDecisions:
             new_callable=AsyncMock,
             return_value=False,
         ):
-            # State shows no capacity
-            state = Mock()
-            state.remaining_requests = 0
-            state.reset_at = None
-            mock_state_manager.get_state.return_value = state
-
             await strategy._try_process_next_request_intelligent(
                 strategy.fast_queues["bucket-1:chat"], "bucket-1:chat"
             )
 
-        # Probe flag should be cleared
+        # Probe flag should be cleared — this request owned the probe and
+        # released it on failure so other requests can try.
         assert "bucket-1" not in strategy._bucket_probes
 
 

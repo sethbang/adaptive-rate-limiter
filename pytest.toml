@@ -95,10 +95,10 @@ filterwarnings = [
     # so regressions surface instead of being silently masked.
 ]
 
-# Timeout (requires pytest-timeout plugin)
-# Uncomment below lines if pytest-timeout is installed
-# timeout = 300
-# timeout_method = "thread"
+# Per-test timeout (pytest-timeout). Bounds hung tests so CI fails fast
+# instead of running until the 6h GitHub Actions limit.
+timeout = "60"
+timeout_method = "thread"
 
 # Minimum pytest version
 minversion = "9.0"

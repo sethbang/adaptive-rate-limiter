@@ -26,7 +26,7 @@ import threading
 import time
 import uuid
 import weakref
-from collections.abc import Awaitable
+from collections.abc import Awaitable, Coroutine
 from dataclasses import dataclass, field
 from pathlib import Path
 from typing import Any, ClassVar, cast
@@ -374,6 +374,11 @@ class RedisBackend(BaseBackend):
         # Orphan recovery task
         self._orphan_recovery_task: asyncio.Task[None] | None = None
 
+        # Strongly-referenced set of fire-and-forget background tasks. The
+        # event loop only weakly references tasks, so a task with no other
+        # reference can be GC'd mid-run. Tasks remove themselves on completion.
+        self._background_tasks: set[asyncio.Task[Any]] = set()
+
         # Per-model limits cache (in-memory)
         self._model_limits: dict[str, ModelLimits] = {}
         self._model_limits_lock = asyncio.Lock()
@@ -422,6 +427,18 @@ class RedisBackend(BaseBackend):
         hash_tag = self._get_hash_tag(model)
         return f"rl:{hash_tag}:state"
 
+    def _get_kv_state_key(self, model: str) -> str:
+        """Get the Redis key for the RateLimitState KV snapshot.
+
+        This is deliberately distinct from ``_get_state_key`` (the hash the
+        atomic Lua reservation scripts own). The Lua schema (rem_req, lim_tok,
+        v, gen_*) and the RateLimitState Pydantic dump (remaining_requests,
+        model_id, ...) are incompatible; keeping them on separate keys
+        prevents cross-schema pollution.
+        """
+        hash_tag = self._get_hash_tag(model)
+        return f"rl:{hash_tag}:rlstate"
+
     def _get_pending_req_key(self, model: str) -> str:
         """Get Redis key for pending requests gauge."""
         hash_tag = self._get_hash_tag(model)
@@ -447,7 +464,7 @@ class RedisBackend(BaseBackend):
             if self._event_loop_id and self._event_loop_id != loop_id:
                 old_connection = self._redis
                 if old_connection is not None:
-                    _ = asyncio.create_task(  # noqa: RUF006
+                    self._spawn_background_task(
                         self._cleanup_connection(self._event_loop_id, old_connection)
                     )
                 self._redis = None
@@ -1576,6 +1593,12 @@ class RedisBackend(BaseBackend):
 
     # === Orphan Recovery ===
 
+    def _spawn_background_task(self, coro: Coroutine[Any, Any, Any]) -> None:
+        """Schedule a fire-and-forget task with a retained strong reference."""
+        task = asyncio.create_task(coro)
+        self._background_tasks.add(task)
+        task.add_done_callback(self._background_tasks.discard)
+
     async def start_orphan_recovery(self) -> None:
         """Start the background orphan recovery task."""
         if self._orphan_recovery_task is None or self._orphan_recovery_task.done():
@@ -1589,6 +1612,20 @@ class RedisBackend(BaseBackend):
             self._orphan_recovery_task.cancel()
             with contextlib.suppress(asyncio.CancelledError):
                 await self._orphan_recovery_task
+
+    async def start(self) -> None:
+        """Start the backend: open the connection and begin orphan recovery.
+
+        Overrides the no-op ``BaseBackend.start`` so that orphan recovery
+        runs whenever the backend is used via ``StateManager`` (which calls
+        ``backend.start()``), not only via ``async with``.
+        """
+        await self._ensure_connected()
+        await self.start_orphan_recovery()
+
+    async def stop(self) -> None:
+        """Stop the backend: halt orphan recovery."""
+        await self.stop_orphan_recovery()
 
     async def _orphan_recovery_loop(self) -> None:
         """Background task to recover orphaned pending reservations."""
@@ -1655,7 +1692,7 @@ class RedisBackend(BaseBackend):
         """Get state for a key (model)."""
         try:
             redis_client = await self._ensure_connected()
-            state_key = self._get_state_key(key)
+            state_key = self._get_kv_state_key(key)
 
             state = await redis_client.hgetall(state_key)
             if state:
@@ -1678,7 +1715,7 @@ class RedisBackend(BaseBackend):
         """
         try:
             redis_client = await self._ensure_connected()
-            state_key = self._get_state_key(key)
+            state_key = self._get_kv_state_key(key)
 
             sanitized: dict[str, Any] = {}
             for k, v in state.items():
@@ -1702,7 +1739,7 @@ class RedisBackend(BaseBackend):
         """
         try:
             redis_client = await self._ensure_connected()
-            pattern = "rl:*:state"
+            pattern = "rl:*:rlstate"
 
             result = {}
 
@@ -1808,9 +1845,17 @@ class RedisBackend(BaseBackend):
         return failure_count >= failure_threshold
 
     async def get_rate_limits(self, model: str) -> dict[str, Any]:
-        """Get current rate limit state for a model."""
+        """Get current rate limit state for a model.
+
+        Reads from the Lua-owned hash (``_get_state_key``) which is
+        authoritative for live capacity.  The Pydantic KV snapshot
+        (``_get_kv_state_key`` / ``:rlstate``) uses different field names
+        and must NOT be used here.
+        """
         try:
-            state = await self.get_state(model)
+            redis_client = await self._ensure_connected()
+            state_key = self._get_state_key(model)
+            state = await redis_client.hgetall(state_key)
             if state:
                 return {
                     "rpm_limit": int(state.get("lim_req", 0)),
@@ -1997,7 +2042,7 @@ class RedisBackend(BaseBackend):
             await asyncio.sleep(duration)
             await self.clear_failures()
 
-        _ = asyncio.create_task(clear_after_delay())  # noqa: RUF006
+        self._spawn_background_task(clear_after_delay())
 
     async def __aenter__(self) -> "RedisBackend":
         """Async context manager entry."""

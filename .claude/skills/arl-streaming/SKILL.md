@@ -47,8 +47,15 @@ yields. The accounting is a side effect.
 
 `RateLimitedAsyncIterator` releases its reservation automatically when the
 `async for` loop runs to completion, and on the error path if the stream
-raises. But a plain `async for ... break` stops early without triggering
-either path — the reservation is left unreleased and capacity leaks.
+raises. `asyncio.CancelledError` and `GeneratorExit` are also handled
+automatically — the iterator catches them, releases the reservation with a
+conservative zero-refund fallback, and re-raises, so cancelling the task or
+wrapping the call in `asyncio.wait_for()` / `asyncio.timeout()` is safe
+**without** a `finally`/`aclose()`.
+
+But a plain `async for ... break` stops early without triggering any of those
+paths — the reservation is left unreleased and capacity leaks. The
+`aclose()` pattern below is only needed for an explicit `break`.
 
 The iterator is **not** an async context manager. To clean up on early break,
 call `aclose()` yourself, in a `try`/`finally` so it runs on every exit path:

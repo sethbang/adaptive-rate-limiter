@@ -121,14 +121,12 @@ class Scheduler(BaseScheduler):
     async def _scheduler_loop(self) -> None:
         """
         Main scheduler loop.
-        Delegates to mode strategy if it supports it.
-        """
-        # Only run loop for modes that need it
-        if self.config.mode == SchedulerMode.BASIC:
-            return
 
-        if hasattr(self.mode_strategy, "run_scheduling_loop"):
-            await self.mode_strategy.run_scheduling_loop()
+        Delegates unconditionally to the mode strategy. Every mode strategy
+        implements ``run_scheduling_loop`` (it is abstract on the base class);
+        BASIC mode's implementation is a lightweight idle loop.
+        """
+        await self.mode_strategy.run_scheduling_loop()
 
     def get_metrics(self) -> dict[str, Any]:
         """

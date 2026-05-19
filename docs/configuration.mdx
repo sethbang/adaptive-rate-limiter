@@ -24,7 +24,7 @@ from adaptive_rate_limiter.scheduler import (
 
 ## RateLimiterConfig
 
-The `RateLimiterConfig` class controls the core behavior of the scheduler. It has 24 configurable fields.
+The `RateLimiterConfig` class controls the core behavior of the scheduler. It has 29 configurable fields.
 
 ```python
 from adaptive_rate_limiter.scheduler import RateLimiterConfig, SchedulerMode
@@ -55,6 +55,15 @@ config = RateLimiterConfig(
 |--------|------|---------|-------------|
 | `request_timeout` | `float` | `30.0` | Request timeout duration in seconds. |
 | `enable_priority_scheduling` | `bool` | `True` | Enable priority-based request scheduling. |
+
+### Retry, Batching & Tracking
+
+| Option | Type | Default | Description |
+|--------|------|---------|-------------|
+| `max_retries` | `int` | `3` | Maximum retry attempts for a failed request (BASIC mode). |
+| `batch_size` | `int` | `50` | Number of eligible queues processed per scheduler iteration (INTELLIGENT mode). |
+| `stale_entry_ttl` | `float \| None` | `None` | TTL in seconds for per-model request-tracking entries (BASIC mode). `None` disables age-based cleanup of tracking state. |
+| `max_tracking_entries` | `int \| None` | `None` | Maximum number of per-model request-tracking entries to retain (BASIC mode). `None` means unbounded. |
 
 ### Rate Limiting Integration
 
@@ -115,6 +124,17 @@ The following validation rules are enforced when creating a `RateLimiterConfig`:
 | `max_concurrent_executions` | Must be `>= 1` |
 | `max_queue_size` | Must be `>= 1` |
 | `overflow_policy` | Must be `"reject"` or `"drop_oldest"` |
+| `request_timeout` | Must be `> 0` |
+| `scheduler_interval` | Must be `> 0` |
+| `backoff_base` | Must be `> 1.0` |
+| `max_backoff` | Must be `> 0` |
+| `failure_window` | Must be `> 0` |
+| `max_failures` | Must be `>= 1` |
+| `health_check_interval` | Must be `> 0` |
+| `max_consecutive_failures` | Must be `>= 1` |
+| `metrics_export_interval` | Must be `> 0` |
+| `prometheus_port` | Must be `1–65535` |
+| `test_rate_multiplier` | Must be `> 0` |
 
 ```python
 # Valid configuration
@@ -125,9 +145,19 @@ config = RateLimiterConfig(
     overflow_policy="drop_oldest",  # OK: valid option
 )
 
-# Invalid configuration (will raise ValidationError)
+# Invalid configuration (will raise ValueError)
 config = RateLimiterConfig(
     rate_limit_buffer_ratio=1.5,    # ERROR: > 1.0
+)
+
+# Invalid: backoff_base must be > 1.0 (1.0 itself is not allowed)
+config = RateLimiterConfig(
+    backoff_base=1.0,               # ERROR: must be > 1.0
+)
+
+# Invalid: prometheus_port must be a valid port number (1–65535)
+config = RateLimiterConfig(
+    prometheus_port=0,              # ERROR: must be between 1 and 65535
 )
 ```
 

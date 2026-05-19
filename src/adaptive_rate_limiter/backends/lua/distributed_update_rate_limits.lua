@@ -92,7 +92,7 @@ local curr_pend_tok = tonumber(redis.call('GET', pend_tok_key) or 0)
 if head_rst_req >= (tonumber(s.rst_req or 0) - stale_buffer) then
     -- Not stale - update
     s.rem_req = math.max(0, head_rem_req - curr_pend_req)
-    s.lim_req = math.max(tonumber(s.lim_req or 0), head_lim_req)  -- Only accept increases within window
+    s.lim_req = head_lim_req  -- Header is authoritative: accept increases AND decreases (tier changes)
     s.rst_req = math.max(tonumber(s.rst_req or 0), head_rst_req)
 end
 
@@ -102,7 +102,7 @@ local calc_rst_tok = now + head_rst_tok_delta
 if calc_rst_tok >= (tonumber(s.rst_tok or 0) - stale_buffer) then
     -- Not stale (with buffer) - update
     s.rem_tok = math.max(0, head_rem_tok - curr_pend_tok)
-    s.lim_tok = math.max(tonumber(s.lim_tok or 0), head_lim_tok)  -- Only accept increases within window
+    s.lim_tok = head_lim_tok  -- Header is authoritative: accept increases AND decreases (tier changes)
     s.rst_tok = math.max(tonumber(s.rst_tok or 0), calc_rst_tok)
 end
 
