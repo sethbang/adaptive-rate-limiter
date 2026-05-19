@@ -897,6 +897,19 @@ class TestRedisBackend:
         mock_redis.expire.assert_called_once()
 
     @pytest.mark.asyncio
+    async def test_kv_state_uses_separate_key_from_lua_hash(self, backend, mock_redis):
+        """set_state/get_state must NOT target the Lua-owned 'rl:{tag}:state' key."""
+        lua_hash_key = backend._get_state_key("gpt-4")
+
+        await backend.set_state("gpt-4", {"remaining_requests": 100})
+
+        # set_state must have written to the rlstate key, never the Lua hash.
+        written_key = mock_redis.hset.call_args.args[0]
+        assert written_key != lua_hash_key
+        assert written_key.endswith(":rlstate")
+        assert backend._get_kv_state_key("gpt-4") == written_key
+
+    @pytest.mark.asyncio
     async def test_clear(self, backend, mock_redis):
         """Test clear."""
         mock_redis.scan.side_effect = [(0, ["key1", "key2"])]

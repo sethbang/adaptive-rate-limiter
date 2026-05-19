@@ -422,6 +422,18 @@ class RedisBackend(BaseBackend):
         hash_tag = self._get_hash_tag(model)
         return f"rl:{hash_tag}:state"
 
+    def _get_kv_state_key(self, model: str) -> str:
+        """Get the Redis key for the RateLimitState KV snapshot.
+
+        This is deliberately distinct from ``_get_state_key`` (the hash the
+        atomic Lua reservation scripts own). The Lua schema (rem_req, lim_tok,
+        v, gen_*) and the RateLimitState Pydantic dump (remaining_requests,
+        model_id, ...) are incompatible; keeping them on separate keys
+        prevents cross-schema pollution.
+        """
+        hash_tag = self._get_hash_tag(model)
+        return f"rl:{hash_tag}:rlstate"
+
     def _get_pending_req_key(self, model: str) -> str:
         """Get Redis key for pending requests gauge."""
         hash_tag = self._get_hash_tag(model)
@@ -1669,7 +1681,7 @@ class RedisBackend(BaseBackend):
         """Get state for a key (model)."""
         try:
             redis_client = await self._ensure_connected()
-            state_key = self._get_state_key(key)
+            state_key = self._get_kv_state_key(key)
 
             state = await redis_client.hgetall(state_key)
             if state:
@@ -1692,7 +1704,7 @@ class RedisBackend(BaseBackend):
         """
         try:
             redis_client = await self._ensure_connected()
-            state_key = self._get_state_key(key)
+            state_key = self._get_kv_state_key(key)
 
             sanitized: dict[str, Any] = {}
             for k, v in state.items():
@@ -1716,7 +1728,7 @@ class RedisBackend(BaseBackend):
         """
         try:
             redis_client = await self._ensure_connected()
-            pattern = "rl:*:state"
+            pattern = "rl:*:rlstate"
 
             result = {}
 
