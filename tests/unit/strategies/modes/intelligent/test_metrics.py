@@ -4,6 +4,8 @@ Unit tests for ReservationMetrics and StreamingMetrics.
 Tests the metrics dataclasses used by IntelligentModeStrategy.
 """
 
+import pytest
+
 from adaptive_rate_limiter.observability.metrics import StreamingMetrics
 from adaptive_rate_limiter.strategies.modes.intelligent import ReservationMetrics
 
@@ -157,3 +159,22 @@ class TestStreamingMetrics:
         assert stats["streaming_errors"] == 1
         # The canonical StreamingMetrics uses total_refunded_tokens instead of refund_total
         assert stats["total_refunded_tokens"] == 200
+
+
+# ============================================================================
+# IntelligentModeStrategy.get_metrics Tests
+# ============================================================================
+
+
+class TestIntelligentStrategyGetMetrics:
+    """Tests for IntelligentModeStrategy.get_metrics()."""
+
+    @pytest.mark.asyncio
+    async def test_get_metrics_reports_real_active_request_count(self, strategy):
+        """get_metrics must report the live _active_request_count, not the
+        always-zero _active_requests placeholder."""
+        strategy._active_request_count = 3
+
+        metrics = strategy.get_metrics()
+
+        assert metrics["active_requests"] == 3

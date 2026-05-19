@@ -199,18 +199,9 @@ class IntelligentModeStrategy(BaseSchedulingModeStrategy):
         self.fast_queues: dict[str, deque[QueuedRequest]] = defaultdict(deque)
         self.queue_info: dict[str, QueueInfo] = {}
 
-        # Optimization buffers for batch processing
-        self._batch_buffer: list[QueuedRequest | None] = [None] * 50
-        self._eligible_buffer: list[str] = [""] * 100
-
         # Fast tracking flags for O(1) queue state checks
         self._queue_has_items: dict[str, bool] = {}
         self._models_with_capacity: set[str] = set()
-
-        # Request reservation system for accurate rate limit tracking
-        self._reserved_capacity: dict[str, dict[str, int]] = defaultdict(
-            lambda: {"requests": 0, "tokens": 0}
-        )
 
         # Per-queue locks for thread safety
         self._queue_locks: dict[str, asyncio.Lock] = defaultdict(asyncio.Lock)
@@ -227,12 +218,7 @@ class IntelligentModeStrategy(BaseSchedulingModeStrategy):
         self._wakeup_event = asyncio.Event()
         self._wakeup_lock = asyncio.Lock()
 
-        # Capacity check failure tracking
-        self._capacity_check_failures: dict[str, int] = {}
-        self.max_capacity_check_failures = 5
-
         # Concurrency protection
-        self._active_requests = 0
         self.max_concurrent_requests = getattr(config, "max_concurrent_executions", 100)
         self._request_timeout = getattr(config, "request_timeout", 300.0)
 
@@ -248,7 +234,6 @@ class IntelligentModeStrategy(BaseSchedulingModeStrategy):
         # Activity tracking for diagnostics
         self._last_activity_time = time.time()
         self._idle_cycles = 0
-        self._last_log_time = 0
 
         # Task tracking system for concurrency management
         self._active_tasks: dict[str, asyncio.Task[Any]] = {}
@@ -486,8 +471,7 @@ class IntelligentModeStrategy(BaseSchedulingModeStrategy):
                 1 for has_items in self._queue_has_items.values() if has_items
             ),
             "idle_cycles": self._idle_cycles,
-            "active_requests": self._active_requests,
-            "capacity_check_failures": len(self._capacity_check_failures),
+            "active_requests": self._active_request_count,
             "reservation_metrics": self._reservation_metrics.get_stats(),
             "streaming_metrics": self._streaming_metrics.get_stats(),
         }
