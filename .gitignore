@@ -42,3 +42,6 @@ docs/architecture
 
 # skill-creator benchmark workspaces (build artifacts, not source)
 .claude/skills/*-workspace/
+
+# Superpowers process artifacts (specs, plans) — never tracked
+docs/superpowers/
