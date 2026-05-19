@@ -161,3 +161,8 @@ def __getattr__(name: str) -> type:
 
         return RedisBackend
     raise AttributeError(f"module {__name__!r} has no attribute {name!r}")
+
+
+def __dir__() -> list[str]:
+    """Include lazily-imported names in dir()/autocomplete."""
+    return sorted(__all__)
