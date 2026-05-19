@@ -903,6 +903,26 @@ class TestRedisBackend:
         await backend.clear()
         mock_redis.delete.assert_called_with("key1", "key2")
 
+    @pytest.mark.asyncio
+    async def test_start_launches_orphan_recovery(self, backend, mock_redis):
+        """start() must launch the orphan recovery loop (not the inherited no-op)."""
+        assert backend._orphan_recovery_task is None
+        await backend.start()
+        try:
+            assert backend._orphan_recovery_task is not None
+            assert not backend._orphan_recovery_task.done()
+        finally:
+            await backend.stop()
+
+    @pytest.mark.asyncio
+    async def test_stop_cancels_orphan_recovery(self, backend, mock_redis):
+        """stop() must cancel the orphan recovery loop started by start()."""
+        await backend.start()
+        task = backend._orphan_recovery_task
+        await backend.stop()
+        assert task is not None
+        assert task.done()
+
 
 class TestRedisBackendExtras:
     @pytest.fixture

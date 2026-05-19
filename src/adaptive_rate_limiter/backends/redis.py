@@ -1590,6 +1590,20 @@ class RedisBackend(BaseBackend):
             with contextlib.suppress(asyncio.CancelledError):
                 await self._orphan_recovery_task
 
+    async def start(self) -> None:
+        """Start the backend: open the connection and begin orphan recovery.
+
+        Overrides the no-op ``BaseBackend.start`` so that orphan recovery
+        runs whenever the backend is used via ``StateManager`` (which calls
+        ``backend.start()``), not only via ``async with``.
+        """
+        await self._ensure_connected()
+        await self.start_orphan_recovery()
+
+    async def stop(self) -> None:
+        """Stop the backend: halt orphan recovery."""
+        await self.stop_orphan_recovery()
+
     async def _orphan_recovery_loop(self) -> None:
         """Background task to recover orphaned pending reservations."""
         while True:
