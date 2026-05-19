@@ -62,8 +62,9 @@ class AccountModeStrategy(BaseSchedulingModeStrategy):
         # down, leaking the request coroutine it had in flight.
         self._active_tasks: set[asyncio.Task[None]] = set()
 
-        # Account-specific configuration
-        self.max_concurrent_requests = getattr(config, "max_concurrent_requests", 10)
+        # Account-specific configuration. RateLimiterConfig exposes the
+        # concurrency limit as ``max_concurrent_executions``.
+        self.max_concurrent_requests = getattr(config, "max_concurrent_executions", 10)
         self.conservative_multiplier = getattr(config, "conservative_multiplier", 0.9)
 
         # Account metrics

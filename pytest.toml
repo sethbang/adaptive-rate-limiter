@@ -110,7 +110,7 @@ doctest_optionflags = "NORMALIZE_WHITESPACE IGNORE_EXCEPTION_DETAIL"
 source = ["src/adaptive_rate_limiter"]
 branch = true
 parallel = true
-omit = ["*/__main__.py", "*/_internal/*"]
+omit = ["*/__main__.py"]
 
 [coverage.paths]
 source = ["adaptive_rate_limiter", "src/adaptive_rate_limiter"]

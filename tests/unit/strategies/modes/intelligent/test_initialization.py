@@ -160,3 +160,60 @@ class TestIntelligentModeStrategyMetrics:
         streaming_metrics = strategy.get_streaming_metrics()
 
         assert isinstance(streaming_metrics, StreamingMetrics)
+
+
+class TestIntelligentModeReservationAge:
+    """Tests for the effective stale-reservation age invariant."""
+
+    def _make_strategy(self, request_timeout):
+        from unittest.mock import AsyncMock, Mock
+
+        from adaptive_rate_limiter.strategies.modes.intelligent import (
+            IntelligentModeStrategy,
+        )
+
+        config = Mock()
+        config.request_timeout = request_timeout
+        config.batch_size = 50
+        config.scheduler_interval = 0.001
+        config.rate_limit_buffer_ratio = 0.9
+        config.max_queue_size = 1000
+        config.overflow_policy = "reject"
+        config.max_concurrent_executions = 100
+
+        scheduler = Mock()
+        scheduler.metrics_enabled = False
+        state_manager = Mock()
+        state_manager.backend = Mock()
+        state_manager.get_state = AsyncMock(return_value=None)
+
+        return IntelligentModeStrategy(
+            scheduler=scheduler,
+            config=config,
+            client=Mock(),
+            provider=Mock(),
+            classifier=Mock(),
+            state_manager=state_manager,
+        )
+
+    def test_effective_age_uses_default_for_short_timeout(self):
+        """A short request_timeout keeps the default reservation age."""
+        strategy = self._make_strategy(request_timeout=30.0)
+        assert strategy._max_reservation_age == strategy.MAX_RESERVATION_AGE
+
+    def test_effective_age_exceeds_long_request_timeout(self):
+        """A request_timeout larger than MAX_RESERVATION_AGE must raise the
+        effective reservation age above it.
+
+        Regression: MAX_RESERVATION_AGE was a fixed 240s ClassVar, so a
+        configured request_timeout > 240s caused the stale-reservation
+        cleanup to reclaim live, in-flight reservations.
+        """
+        request_timeout = 600.0
+        strategy = self._make_strategy(request_timeout=request_timeout)
+        assert strategy._max_reservation_age > request_timeout
+        # And the reservation tracker is configured with the same value.
+        assert (
+            strategy._reservation_tracker._max_reservation_age
+            == strategy._max_reservation_age
+        )

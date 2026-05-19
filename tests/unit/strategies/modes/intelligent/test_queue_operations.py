@@ -107,6 +107,40 @@ class TestIntelligentModeStrategySubmitRequest:
         with pytest.raises(RateLimiterError):
             result1.request.future.result()
 
+    @pytest.mark.asyncio
+    async def test_submit_request_overflow_drop_oldest_tolerates_done_future(
+        self, strategy, metadata, mock_config
+    ):
+        """Dropping an already-completed request future during overflow must
+        not raise InvalidStateError.
+
+        Regression: the drop path guarded set_exception with
+        future.cancelled() only. A future already resolved with a result is
+        done() but not cancelled(), so set_exception raised InvalidStateError.
+        """
+        mock_config.overflow_policy = "drop_oldest"
+        mock_config.max_queue_size = 1
+
+        request_func = AsyncMock(return_value="success")
+
+        result1 = await strategy.submit_request(metadata, request_func)
+        # The queued request's future is already resolved before the
+        # overflow drop runs.
+        result1.request.future.set_result("already done")
+
+        meta2 = RequestMetadata(
+            request_id="req-456",
+            model_id="test-model",
+            resource_type="chat",
+            estimated_tokens=100,
+        )
+        # Overflow drops the first request; must not raise.
+        result2 = await strategy.submit_request(meta2, request_func)
+
+        assert result2.request is not None
+        # The pre-resolved result is preserved, not overwritten.
+        assert result1.request.future.result() == "already done"
+
 
 # ============================================================================
 # Queue Management Tests
@@ -552,3 +586,39 @@ class TestIntelligentModeStrategyImminentReset:
 
         # Queue should NOT be eligible
         assert len(eligible) == 0
+
+
+class TestIntelligentModeStrategyQueueLockSafety:
+    """Tests that submit_request mutates queue state under the queue lock."""
+
+    @pytest.mark.asyncio
+    async def test_submit_request_serializes_queue_mutation_with_processing(
+        self, strategy, metadata
+    ):
+        """submit_request must acquire the per-queue lock before mutating
+        the queue and the _queue_has_items flag.
+
+        Regression: submit_request appended to the deque and set
+        _queue_has_items=True without holding _queue_locks[queue_key],
+        while the scheduler loop cleared the flag under that lock. The
+        interleaving lost the flag update and starved a non-empty queue.
+        """
+        queue_key = await strategy._get_queue_key(metadata)
+        await strategy._create_fast_queue(queue_key, metadata)
+
+        # Hold the queue lock, as the scheduler loop does while draining.
+        async with strategy._queue_locks[queue_key]:
+            submit_task = asyncio.create_task(
+                strategy.submit_request(metadata, AsyncMock(return_value="ok"))
+            )
+            # Give submit_request ample time to run; it must block on the lock.
+            await asyncio.sleep(0.05)
+
+            assert len(strategy.fast_queues[queue_key]) == 0
+            assert not submit_task.done()
+
+        # Lock released: submit_request can now complete its mutation.
+        await submit_task
+
+        assert len(strategy.fast_queues[queue_key]) == 1
+        assert strategy._queue_has_items[queue_key] is True

@@ -446,7 +446,7 @@ These exports are documented in the [API Reference](#api-reference) section abov
 
 ### Internal APIs
 
-Modules, classes, and functions prefixed with `_` (single underscore) are internal implementation details. The [`_internal/`](src/adaptive_rate_limiter/_internal/) package and any `_`-prefixed names are explicitly not part of the public API and may change without notice between any versions.
+Modules, classes, and functions prefixed with `_` (single underscore) are internal implementation details. Any `_`-prefixed name is explicitly not part of the public API and may change without notice between any versions.
 
 ### Deprecation Policy
 

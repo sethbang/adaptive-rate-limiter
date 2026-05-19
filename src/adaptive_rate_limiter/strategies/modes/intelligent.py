@@ -155,11 +155,11 @@ class IntelligentModeStrategy(BaseSchedulingModeStrategy):
         STALE_CLEANUP_INTERVAL: Interval in seconds between cleanup runs
     """
 
-    # Reservation tracking configuration (ClassVar allows test modification)
-    # CRITICAL: Must be < max_request_timeout (300s) to prevent double-release race
-    MAX_RESERVATION_AGE: ClassVar[int] = (
-        240  # 4 minutes - SHORTER than Redis orphan recovery (5 min)
-    )
+    # Reservation tracking configuration (ClassVar allows test modification).
+    # MAX_RESERVATION_AGE is the default *floor*: __init__ raises the
+    # effective age (self._max_reservation_age) above request_timeout so the
+    # stale-reservation cleanup never reclaims a still-running reservation.
+    MAX_RESERVATION_AGE: ClassVar[int] = 240  # 4 minutes (default floor)
     MAX_RESERVATIONS: ClassVar[int] = 10000  # Prevent unbounded memory growth
     STALE_CLEANUP_INTERVAL: ClassVar[int] = 60  # Run cleanup every minute
 
@@ -236,6 +236,15 @@ class IntelligentModeStrategy(BaseSchedulingModeStrategy):
         self.max_concurrent_requests = getattr(config, "max_concurrent_executions", 100)
         self._request_timeout = getattr(config, "request_timeout", 300.0)
 
+        # Effective stale-reservation age. A request can legitimately hold a
+        # reservation for up to request_timeout, and the cleanup only runs
+        # every STALE_CLEANUP_INTERVAL, so the age must exceed their sum or
+        # the cleanup would reclaim live, in-flight reservations.
+        self._max_reservation_age = max(
+            self.MAX_RESERVATION_AGE,
+            int(self._request_timeout) + self.STALE_CLEANUP_INTERVAL,
+        )
+
         # Activity tracking for diagnostics
         self._last_activity_time = time.time()
         self._idle_cycles = 0
@@ -253,18 +262,15 @@ class IntelligentModeStrategy(BaseSchedulingModeStrategy):
         self._cleanup_interval = 1.0
         self._cleanup_task: asyncio.Task[None] | None = None
 
-        # Cold start probing
+        # Cold start probing. Cold-start stampede protection is provided by
+        # the probe gating in _try_process_next_request_intelligent().
         self._bucket_probes: set[str] = set()
-
-        # Per-bucket initialization locks to prevent cold-start race conditions
-        self._bucket_init_locks: dict[str, asyncio.Lock] = {}
-        self._initialized_buckets: set[str] = set()
 
         # ===== RESERVATION TRACKING =====
         # Reservation tracking via composition (delegates storage operations)
         self._reservation_tracker = ReservationTracker(
             max_reservations=self.MAX_RESERVATIONS,
-            max_reservation_age=self.MAX_RESERVATION_AGE,
+            max_reservation_age=self._max_reservation_age,
             stale_cleanup_interval=self.STALE_CLEANUP_INTERVAL,
         )
 
@@ -299,27 +305,6 @@ class IntelligentModeStrategy(BaseSchedulingModeStrategy):
             streaming_metrics=self._streaming_metrics,
             register_callback=self._streaming_cleanup_manager.register,
         )
-
-    async def _ensure_bucket_initialized(self, bucket_id: str) -> None:
-        """
-        Ensure a bucket is initialized with a lock to prevent cold-start races.
-
-        This prevents multiple concurrent requests from all seeing "empty state"
-        and firing simultaneously before the first response establishes the rate limit.
-        """
-        if bucket_id in self._initialized_buckets:
-            return  # Fast path - no lock needed
-
-        # Use setdefault for atomic lock creation to prevent race conditions
-        # where multiple coroutines might try to create a lock for the same bucket
-        lock = self._bucket_init_locks.setdefault(bucket_id, asyncio.Lock())
-
-        async with lock:
-            if bucket_id in self._initialized_buckets:
-                return  # Double-check pattern
-
-            # Mark as initialized so future requests skip the lock
-            self._initialized_buckets.add(bucket_id)
 
     async def submit_request(
         self, metadata: RequestMetadata, request_func: Callable[[], Awaitable[Any]]
@@ -361,26 +346,34 @@ class IntelligentModeStrategy(BaseSchedulingModeStrategy):
         queue = self.fast_queues[queue_key]
         queue_info = self.queue_info.get(queue_key)
 
-        if await self._check_queue_overflow(len(queue), queue_key) and (
-            getattr(self.config, "overflow_policy", "reject") == "drop_oldest" and queue
-        ):
-            dropped_request = queue.popleft()
-            # Update metadata for dropped request
+        # All queue + _queue_has_items mutation happens under the per-queue
+        # lock so it serializes with the scheduler loop's drain. Otherwise an
+        # append racing with the loop clearing the flag loses the update and
+        # starves a non-empty queue.
+        async with self._queue_locks[queue_key]:
+            if await self._check_queue_overflow(len(queue), queue_key) and (
+                getattr(self.config, "overflow_policy", "reject") == "drop_oldest"
+                and queue
+            ):
+                dropped_request = queue.popleft()
+                # Update metadata for dropped request
+                if queue_info:
+                    await queue_info.update_on_dequeue()
+                # Guard with done(): a future already resolved (result or
+                # exception) or cancelled cannot accept set_exception.
+                if not dropped_request.future.done():
+                    dropped_request.future.set_exception(
+                        RateLimiterError("Request dropped due to queue overflow")
+                    )
+
+            # Add to queue
+            queue.append(queued_request)
+            self._queue_has_items[queue_key] = True
+
+            # Update metadata for safe priority tracking
             if queue_info:
-                await queue_info.update_on_dequeue()
-            if not dropped_request.future.cancelled():
-                dropped_request.future.set_exception(
-                    RateLimiterError("Request dropped due to queue overflow")
-                )
-
-        # Add to queue
-        queue.append(queued_request)
-        self._queue_has_items[queue_key] = True
-
-        # Update metadata for safe priority tracking
-        if queue_info:
-            priority = float(metadata.priority)
-            await queue_info.update_on_enqueue(priority)
+                priority = float(metadata.priority)
+                await queue_info.update_on_enqueue(priority)
 
         # Signal scheduler loop (fire-and-forget with exception handling)
         task = asyncio.create_task(self._safe_set_wakeup_event())
@@ -408,7 +401,11 @@ class IntelligentModeStrategy(BaseSchedulingModeStrategy):
             except asyncio.CancelledError:
                 logger.info("Intelligent scheduler loop cancelled")
                 break
-            except (AttributeError, ValueError, OSError, TypeError) as e:
+            except Exception as e:
+                # Catch broadly: any unhandled exception here would otherwise
+                # escape the loop and permanently kill the scheduler. The loop
+                # must keep running and process subsequent requests.
+                # (CancelledError is a BaseException and is handled above.)
                 logger.exception(f"Intelligent scheduler error: {e}")
                 await asyncio.sleep(0.01)
 
@@ -434,6 +431,18 @@ class IntelligentModeStrategy(BaseSchedulingModeStrategy):
         Cancels all background tasks and cleans up resources.
         """
         self._running = False
+
+        # Cancel in-flight executor tasks first, while the state manager and
+        # backend are still alive, so their shielded cancellation cleanup
+        # (capacity release / state sync) can complete.
+        async with self._task_lock:
+            active_tasks = list(self._active_tasks.values())
+            self._active_tasks.clear()
+        for task in active_tasks:
+            if not task.done():
+                task.cancel()
+        if active_tasks:
+            await asyncio.gather(*active_tasks, return_exceptions=True)
 
         # Stop reset watcher (cancels all watcher tasks)
         await self._reset_watcher.stop()
@@ -861,22 +870,44 @@ class IntelligentModeStrategy(BaseSchedulingModeStrategy):
 
         # Remove request from queue
         request_to_process = queue.popleft()
-
-        # Update metadata for safe priority tracking
         queue_info = self.queue_info.get(queue_key)
-        if queue_info:
-            await queue_info.update_on_dequeue()
-
-        # Create tracked task with proper resource management
         task_id = f"{queue_key}:{request_to_process.metadata.request_id}"
-        task = asyncio.create_task(
-            self._execute_request_with_tracking(request_to_process, task_id, bucket_id)
-        )
+        task: asyncio.Task[Any] | None = None
 
-        # Track the task
-        async with self._task_lock:
-            self._active_tasks[task_id] = task
-            self._active_request_count += 1
+        try:
+            # Update metadata for safe priority tracking
+            if queue_info:
+                await queue_info.update_on_dequeue()
+
+            # Create tracked task with proper resource management
+            task = asyncio.create_task(
+                self._execute_request_with_tracking(
+                    request_to_process, task_id, bucket_id
+                )
+            )
+
+            # Track the task
+            async with self._task_lock:
+                self._active_tasks[task_id] = task
+                self._active_request_count += 1
+        except asyncio.CancelledError:
+            # Cancelled between a successful capacity reservation and the
+            # executor task taking ownership of it. Release the orphaned
+            # reservation so capacity is not held until stale cleanup runs.
+            # If the task was already created it owns the reservation and
+            # will release it itself via _execute_request_with_tracking.
+            if task is None:
+                with contextlib.suppress(Exception):
+                    await asyncio.shield(
+                        self._update_rate_limit_state(
+                            request_to_process.metadata,
+                            None,
+                            status_code=None,
+                            bucket_id_override=bucket_id,
+                            clear_all_reservations=True,
+                        )
+                    )
+            raise
 
         return True
 
@@ -925,9 +956,6 @@ class IntelligentModeStrategy(BaseSchedulingModeStrategy):
 
         # Estimate tokens for this request
         estimated_tokens = metadata.estimated_tokens or 0
-
-        # Ensure bucket is initialized (Cold Start Protection)
-        await self._ensure_bucket_initialized(bucket_id)
 
         # ATOMIC OPERATION - No race condition!
         (
@@ -1402,7 +1430,7 @@ class IntelligentModeStrategy(BaseSchedulingModeStrategy):
 
     async def _cleanup_stale_reservations(self) -> int:
         """
-        Clean up reservations older than MAX_RESERVATION_AGE.
+        Clean up reservations older than the effective reservation age.
 
         This method handles backend release calls for stale reservations.
         The ReservationTracker provides storage operations via its
@@ -1411,14 +1439,17 @@ class IntelligentModeStrategy(BaseSchedulingModeStrategy):
         Returns:
             Number of reservations cleaned up.
         """
-        cutoff = time.time() - self.MAX_RESERVATION_AGE
+        # Monotonic clock: ReservationContext.created_at is monotonic, so the
+        # cutoff must be too. Wall-clock would make NTP steps reclaim live
+        # reservations en masse.
+        cutoff = time.monotonic() - self._max_reservation_age
 
         # Use encapsulated API to get and clear stale reservations
         stale_contexts = await self._reservation_tracker.get_and_clear_stale(cutoff)
 
         # Release OUTSIDE lock to avoid holding lock during backend calls
         for ctx in stale_contexts:
-            age = time.time() - ctx.created_at
+            age = time.monotonic() - ctx.created_at
             logger.warning(
                 f"Cleaned up stale reservation {ctx.reservation_id} "
                 f"(age: {age:.1f}s, bucket: {ctx.bucket_id})"

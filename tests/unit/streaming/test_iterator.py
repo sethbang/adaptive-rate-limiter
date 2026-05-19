@@ -950,7 +950,7 @@ class TestRateLimitedAsyncIteratorLongRunningWarning:
             request_id="req-1",
             reserved_tokens=1000,
             backend=mock_backend,
-            created_at=time.time() - 1500,  # 25 minutes ago
+            created_at=time.monotonic() - 1500,  # 25 minutes ago
         )
 
         async def mock_iter() -> AsyncIterator[dict[str, str]]:
@@ -979,7 +979,7 @@ class TestRateLimitedAsyncIteratorLongRunningWarning:
             request_id="req-1",
             reserved_tokens=1000,
             backend=mock_backend,
-            created_at=time.time() - 1500,  # 25 minutes ago
+            created_at=time.monotonic() - 1500,  # 25 minutes ago
         )
 
         async def mock_iter() -> AsyncIterator[dict[str, str]]:

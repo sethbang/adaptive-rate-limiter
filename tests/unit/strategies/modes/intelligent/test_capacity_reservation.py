@@ -283,7 +283,7 @@ class TestIntelligentModeStrategyStaleReservationCleanup:
                 reservation_id="res-1",
                 bucket_id="bucket-1",
                 estimated_tokens=100,
-                created_at=time.time() - 1000,  # Very old
+                created_at=time.monotonic() - 1000,  # Very old
             )
         )
         strategy._reservation_tracker._request_id_index["req-1"] = {
@@ -548,3 +548,44 @@ class TestIntelligentModeStrategyCapacityRetryFailurePaths:
 
         # Allow task to run
         await asyncio.sleep(0.05)
+
+
+class TestIntelligentModeReservationCancellationLeak:
+    """Reservations must not leak if processing is cancelled after reserving."""
+
+    @pytest.mark.asyncio
+    async def test_cancellation_after_reserve_releases_reservation(
+        self, strategy, metadata, mock_backend
+    ):
+        """If _try_process_next_request_intelligent is cancelled after a
+        successful capacity reservation but before the executor task is
+        created, the reservation must be released.
+
+        Regression: cancellation at the update_on_dequeue() await leaked the
+        reservation until the stale-reservation cleanup (minutes later).
+        """
+        from adaptive_rate_limiter.types.queue import QueuedRequest
+
+        queue_key = await strategy._get_queue_key(metadata)
+        await strategy._create_fast_queue(queue_key, metadata)
+
+        queue = strategy.fast_queues[queue_key]
+        queue.append(
+            QueuedRequest(
+                metadata=metadata,
+                request_func=AsyncMock(return_value="ok"),
+                future=asyncio.Future(),
+                queue_entry_time=datetime.now(timezone.utc),
+            )
+        )
+
+        # Simulate cancellation arriving at the update_on_dequeue await,
+        # i.e. after capacity has been reserved but before create_task().
+        queue_info = strategy.queue_info[queue_key]
+        queue_info.update_on_dequeue = AsyncMock(side_effect=asyncio.CancelledError)
+
+        with pytest.raises(asyncio.CancelledError):
+            await strategy._try_process_next_request_intelligent(queue, queue_key)
+
+        # The reservation taken before cancellation must have been released.
+        mock_backend.release_reservation.assert_awaited()
