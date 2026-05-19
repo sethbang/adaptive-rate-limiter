@@ -104,7 +104,7 @@ class FallbackRateLimiter:
     - Lock-free jitter: Sleep happens OUTSIDE any locks
     - Per-request delay: Every request is rate-limited, not just the first
     - Exponential backoff on 429s: Backs off aggressively to prevent cascade
-    - AIMD (Multiplicative Increase on 429, Additive Decrease on success) for recovery
+    - AIMD (Additive Increase, Multiplicative Decrease) for recovery
     """
 
     def __init__(self, config: dict[str, Any]):
