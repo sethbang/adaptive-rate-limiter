@@ -187,6 +187,28 @@ class RateLimiterConfig:
             raise ValueError("stale_entry_ttl must be positive when set")
         if self.max_tracking_entries is not None and self.max_tracking_entries < 1:
             raise ValueError("max_tracking_entries must be at least 1 when set")
+        if self.request_timeout <= 0:
+            raise ValueError("request_timeout must be positive")
+        if self.scheduler_interval <= 0:
+            raise ValueError("scheduler_interval must be positive")
+        if self.backoff_base <= 1.0:
+            raise ValueError("backoff_base must be greater than 1.0")
+        if self.max_backoff <= 0:
+            raise ValueError("max_backoff must be positive")
+        if self.failure_window <= 0:
+            raise ValueError("failure_window must be positive")
+        if self.max_failures < 1:
+            raise ValueError("max_failures must be at least 1")
+        if self.health_check_interval <= 0:
+            raise ValueError("health_check_interval must be positive")
+        if self.max_consecutive_failures < 1:
+            raise ValueError("max_consecutive_failures must be at least 1")
+        if self.metrics_export_interval <= 0:
+            raise ValueError("metrics_export_interval must be positive")
+        if not 1 <= self.prometheus_port <= 65535:
+            raise ValueError("prometheus_port must be between 1 and 65535")
+        if self.test_rate_multiplier <= 0:
+            raise ValueError("test_rate_multiplier must be positive")
 
 
 @dataclass
