@@ -508,7 +508,7 @@ class BaseScheduler(ABC):
         delay = min(delay, max_backoff)
 
         # Add small jitter to prevent thundering herd
-        jitter = delay * BACKOFF_JITTER_FACTOR * random.random()  # noqa: S311
+        jitter = delay * BACKOFF_JITTER_FACTOR * random.random()  # noqa: S311  # nosec B311
         delay += jitter
 
         logger.debug(f"Calculated backoff for attempt {attempt}: {delay:.2f}s")
