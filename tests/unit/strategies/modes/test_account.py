@@ -261,8 +261,12 @@ class TestAccountModeStrategySchedulingLoop:
     @pytest.mark.asyncio
     async def test_loop_respects_concurrency_limit(self, strategy):
         """Test loop respects max_concurrent_requests."""
-        # Simulate reaching max concurrent requests
-        strategy.active_count = strategy.max_concurrent_requests
+        # Simulate reaching max concurrent requests by exhausting the semaphore
+        # (the authoritative gate) as well as setting active_count.
+        cap = strategy.max_concurrent_requests
+        for _ in range(cap):
+            await strategy._concurrency_semaphore.acquire()
+        strategy.active_count = cap
 
         # Add requests to queue
         metadata = RequestMetadata(
@@ -273,8 +277,12 @@ class TestAccountModeStrategySchedulingLoop:
         # Run one iteration
         await strategy._loop_account_mode()
 
-        # Queue should not be processed
+        # Queue should not be processed because semaphore is exhausted
         assert len(strategy.account_queues["test"]) == 1
+
+        # Release semaphore slots to avoid leaking state into other tests
+        for _ in range(cap):
+            strategy._concurrency_semaphore.release()
 
     @pytest.mark.asyncio
     async def test_find_eligible_queues_returns_non_empty(self, strategy, metadata):
@@ -295,6 +303,36 @@ class TestAccountModeStrategySchedulingLoop:
         eligible = await strategy._find_eligible_queues()
 
         assert "empty-queue" not in eligible
+
+    @pytest.mark.asyncio
+    async def test_loop_does_not_overshoot_concurrency_cap(self, strategy):
+        """_loop_account_mode must never start more tasks than the cap allows."""
+        # strategy fixture already has max_concurrent_executions=2; enforce the
+        # semaphore cap of 2 explicitly in case the semaphore was built first.
+        strategy._concurrency_semaphore = asyncio.Semaphore(2)
+        started: list[int] = []
+        release = asyncio.Event()
+
+        async def slow_request() -> str:
+            started.append(1)
+            await release.wait()
+            return "ok"
+
+        # Enqueue 5 requests across distinct queue keys.
+        for i in range(5):
+            md = RequestMetadata(
+                request_id=f"req-overshoot-{i}",
+                model_id=f"model-{i}",
+                resource_type="chat",
+            )
+            await strategy.submit_request(md, slow_request)
+
+        await strategy._loop_account_mode()
+        await asyncio.sleep(0.05)  # let spawned tasks reach slow_request
+
+        assert len(started) <= 2, f"started {len(started)} tasks, cap is 2"
+        release.set()
+        await strategy.stop()
 
 
 class TestAccountModeStrategyExecution:

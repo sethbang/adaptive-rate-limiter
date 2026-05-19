@@ -67,6 +67,13 @@ class AccountModeStrategy(BaseSchedulingModeStrategy):
         self.max_concurrent_requests = getattr(config, "max_concurrent_executions", 10)
         self.conservative_multiplier = getattr(config, "conservative_multiplier", 0.9)
 
+        # Semaphore enforcing the concurrency cap. The plain ``active_count``
+        # int is kept for metrics only; the semaphore is the real gate so the
+        # loop cannot overshoot by spawning many tasks before any increments.
+        self._concurrency_semaphore = asyncio.Semaphore(
+            getattr(config, "max_concurrent_executions", 10)
+        )
+
         # Account metrics
         self.account_metrics = {
             METRIC_TOTAL_SCHEDULED: 0,
@@ -173,16 +180,14 @@ class AccountModeStrategy(BaseSchedulingModeStrategy):
 
     async def _loop_account_mode(self) -> None:
         """Scheduler loop for ACCOUNT mode."""
-        # Check capacity
-        if self.active_count >= self.max_concurrent_requests:
-            return
-
         # Find eligible queues
         eligible_queues = await self._find_eligible_queues()
 
         # Process requests from eligible queues
         for queue_key in eligible_queues:
-            if self.active_count >= self.max_concurrent_requests:
+            # locked() is a cheap pre-check; the task acquires the semaphore
+            # itself before running, which is the authoritative gate.
+            if self._concurrency_semaphore.locked():
                 break
 
             queue = self.account_queues.get(queue_key)
@@ -190,15 +195,14 @@ class AccountModeStrategy(BaseSchedulingModeStrategy):
                 continue
 
             request = queue.popleft()
-            self.account_metrics[METRIC_CURRENT_QUEUE_SIZE] -= 1
+            self.account_metrics[METRIC_CURRENT_QUEUE_SIZE] = max(
+                0, self.account_metrics[METRIC_CURRENT_QUEUE_SIZE] - 1
+            )
 
             # Clean up empty queue to prevent unbounded growth
             if not queue:
                 del self.account_queues[queue_key]
 
-            # Execute request. Track the task so stop() can cancel/await it;
-            # leaving it untracked leaks its in-flight coroutine when the
-            # loop shuts down before the task finishes.
             task = asyncio.create_task(self._execute_account_request(request))
             self._active_tasks.add(task)
             task.add_done_callback(self._active_tasks.discard)
@@ -215,6 +219,7 @@ class AccountModeStrategy(BaseSchedulingModeStrategy):
 
     async def _execute_account_request(self, request: QueuedRequest) -> None:
         """Execute request in ACCOUNT mode."""
+        await self._concurrency_semaphore.acquire()
         # Track as active
         self.active_requests[request.metadata.request_id] = request
         self.active_count += 1
@@ -251,7 +256,7 @@ class AccountModeStrategy(BaseSchedulingModeStrategy):
                 )
         except Exception as e:
             # Catch all exceptions to ensure futures are never left unresolved.
-            # CancelledError is handled separately above (line 208) and re-raised.
+            # CancelledError is handled separately above and re-raised.
             self.account_metrics[METRIC_TOTAL_FAILED] += 1
             logger.exception(f"Account request execution error: {e}")
 
@@ -263,3 +268,4 @@ class AccountModeStrategy(BaseSchedulingModeStrategy):
             # Remove from active requests
             self.active_requests.pop(request.metadata.request_id, None)
             self.active_count -= 1
+            self._concurrency_semaphore.release()
