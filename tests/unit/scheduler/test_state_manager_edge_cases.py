@@ -447,6 +447,10 @@ class TestUpdateStateFromHeadersEdgeCases:
         """Test update creates fallback state if none exists (line 982-985)."""
         manager.provider = AsyncMock()
         manager.provider.get_bucket_for_model.return_value = "bucket-1"
+        # discover_limits() really returns a dict; without this the bare
+        # AsyncMock makes buckets.get(key) async, leaking an un-awaited
+        # coroutine.
+        manager.provider.discover_limits.return_value = {}
         manager.backend.update_rate_limits.return_value = 1
 
         # No existing state

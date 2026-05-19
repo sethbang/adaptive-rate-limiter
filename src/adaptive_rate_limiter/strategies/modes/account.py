@@ -57,6 +57,11 @@ class AccountModeStrategy(BaseSchedulingModeStrategy):
         self.active_requests: dict[str, QueuedRequest] = {}
         self.active_count = 0
 
+        # In-flight execution tasks, tracked so stop() can drain them. An
+        # untracked task is cancelled abruptly when the event loop shuts
+        # down, leaking the request coroutine it had in flight.
+        self._active_tasks: set[asyncio.Task[None]] = set()
+
         # Account-specific configuration
         self.max_concurrent_requests = getattr(config, "max_concurrent_requests", 10)
         self.conservative_multiplier = getattr(config, "conservative_multiplier", 0.9)
@@ -140,8 +145,18 @@ class AccountModeStrategy(BaseSchedulingModeStrategy):
         self._running = True
 
     async def stop(self) -> None:
-        """Stop account mode strategy."""
+        """Stop account mode strategy and drain in-flight execution tasks."""
         self._running = False
+
+        # Cancel and await in-flight execution tasks so their request
+        # coroutines are not left un-awaited when the loop shuts down.
+        tasks = list(self._active_tasks)
+        for task in tasks:
+            if not task.done():
+                task.cancel()
+        if tasks:
+            await asyncio.gather(*tasks, return_exceptions=True)
+        self._active_tasks.clear()
 
     def get_metrics(self) -> dict[str, Any]:
         """Get account mode metrics."""
@@ -180,8 +195,12 @@ class AccountModeStrategy(BaseSchedulingModeStrategy):
             if not queue:
                 del self.account_queues[queue_key]
 
-            # Execute request
-            _ = asyncio.create_task(self._execute_account_request(request))  # noqa: RUF006
+            # Execute request. Track the task so stop() can cancel/await it;
+            # leaving it untracked leaks its in-flight coroutine when the
+            # loop shuts down before the task finishes.
+            task = asyncio.create_task(self._execute_account_request(request))
+            self._active_tasks.add(task)
+            task.add_done_callback(self._active_tasks.discard)
 
     async def _find_eligible_queues(self) -> list[str]:
         """Find eligible queues for ACCOUNT mode."""

@@ -424,6 +424,10 @@ class TestAccountModeStrategyLifecycle:
         mock_config.conservative_multiplier = 0.9
         mock_config.scheduler_interval = 0.01
         mock_config.max_queue_size = 100
+        # Real number, not a Mock: _execute_account_request passes this to
+        # asyncio.wait_for(), which fails on a Mock timeout before consuming
+        # the request coroutine and leaks it.
+        mock_config.request_timeout = 1.0
         return AccountModeStrategy(mock_scheduler, mock_config, Mock())
 
     @pytest.mark.asyncio
@@ -488,6 +492,10 @@ class TestAccountModeStrategyMetrics:
         mock_config.conservative_multiplier = 0.9
         mock_config.scheduler_interval = 0.01
         mock_config.max_queue_size = 100
+        # Real number, not a Mock: _execute_account_request passes this to
+        # asyncio.wait_for(), which fails on a Mock timeout before consuming
+        # the request coroutine and leaks it.
+        mock_config.request_timeout = 1.0
         return AccountModeStrategy(mock_scheduler, mock_config, Mock())
 
     def test_get_metrics_includes_mode(self, strategy):

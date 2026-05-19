@@ -373,7 +373,7 @@ class TestSignalHandlerErrorsCoverage:
 class TestFlushPendingUpdatesSyncCoverage:
     """Tests for _flush_pending_updates_sync edge cases (lines 1159-1183)."""
 
-    def test_flush_sync_timeout_error(self, mock_backend, caplog):
+    def test_flush_sync_timeout_error(self, mock_backend, caplog, close_coro):
         """Test _flush_pending_updates_sync handles TimeoutError (lines 1178-1181)."""
         config = StateConfig(cache_policy=CachePolicy.WRITE_BACK)
         manager = StateManager(backend=mock_backend, config=config)
@@ -396,6 +396,7 @@ class TestFlushPendingUpdatesSyncCoverage:
                 "adaptive_rate_limiter.scheduler.state.manager.asyncio.run_coroutine_threadsafe"
             ) as mock_run:
                 mock_run.return_value = mock_future
+                mock_run.side_effect = close_coro()
 
                 with caplog.at_level(logging.WARNING):
                     manager._flush_pending_updates_sync()
@@ -403,7 +404,9 @@ class TestFlushPendingUpdatesSyncCoverage:
                 # Should log timeout warning
                 assert "timed out" in caplog.text.lower()
 
-    def test_flush_sync_no_running_loop_create_new(self, mock_backend, caplog):
+    def test_flush_sync_no_running_loop_create_new(
+        self, mock_backend, caplog, close_coro
+    ):
         """Test _flush_pending_updates_sync creates new event loop (lines 1159-1162)."""
         config = StateConfig(cache_policy=CachePolicy.WRITE_BACK)
         manager = StateManager(backend=mock_backend, config=config)
@@ -442,6 +445,7 @@ class TestFlushPendingUpdatesSyncCoverage:
             ) as mock_set_loop,
         ):
             mock_loop = MagicMock()
+            mock_loop.run_until_complete = MagicMock(side_effect=close_coro())
             mock_new_loop.return_value = mock_loop
 
             manager._flush_pending_updates_sync()
@@ -450,7 +454,7 @@ class TestFlushPendingUpdatesSyncCoverage:
             mock_new_loop.assert_called_once()
             mock_set_loop.assert_called_once_with(mock_loop)
 
-    def test_flush_sync_exception_during_write(self, mock_backend, caplog):
+    def test_flush_sync_exception_during_write(self, mock_backend, caplog, close_coro):
         """Test _flush_pending_updates_sync handles general exception (line 1189-1190)."""
         config = StateConfig(cache_policy=CachePolicy.WRITE_BACK)
         manager = StateManager(backend=mock_backend, config=config)
@@ -473,6 +477,7 @@ class TestFlushPendingUpdatesSyncCoverage:
                 "adaptive_rate_limiter.scheduler.state.manager.asyncio.run_coroutine_threadsafe"
             ) as mock_run:
                 mock_run.return_value = mock_future
+                mock_run.side_effect = close_coro()
 
                 with caplog.at_level(logging.ERROR):
                     manager._flush_pending_updates_sync()

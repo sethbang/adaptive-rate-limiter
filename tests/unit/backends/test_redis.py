@@ -21,6 +21,10 @@ class TestRedisBackend:
         mock.evalsha.return_value = [1, 0, 0, 0, 0, 0]
         # Mock ping
         mock.ping.return_value = True
+        # The cluster slot-map refresh reads nodes_manager.nodes_cache.keys();
+        # give it a real dict so the deep AsyncMock does not turn .keys() into
+        # an un-awaited coroutine.
+        mock.nodes_manager.nodes_cache = {}
         return mock
 
     @pytest.fixture
@@ -1089,6 +1093,9 @@ class TestRedisBackendExtras:
             mock_cluster_instance = AsyncMock()
             MockCluster.from_url.return_value = mock_cluster_instance
             mock_cluster_instance.ping.return_value = True
+            # Real dict avoids an un-awaited coroutine from the deep
+            # AsyncMock's nodes_cache.keys() during slot-map refresh.
+            mock_cluster_instance.nodes_manager.nodes_cache = {}
 
             backend = RedisBackend(cluster_mode=True)
 

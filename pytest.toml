@@ -89,8 +89,10 @@ filterwarnings = [
     "ignore::ResourceWarning",
     "ignore:.*unclosed.*:ResourceWarning",
     "ignore::pytest.PytestConfigWarning",
-    # AsyncMock coroutine warnings in Python 3.13+
-    "ignore:coroutine .* was never awaited:RuntimeWarning",
+    # NOTE: deliberately no "ignore:coroutine ... was never awaited" filter.
+    # An un-awaited coroutine is a real test defect (a mocked coroutine
+    # runner that fails to consume its argument); leave the warning visible
+    # so regressions surface instead of being silently masked.
 ]
 
 # Timeout (requires pytest-timeout plugin)
