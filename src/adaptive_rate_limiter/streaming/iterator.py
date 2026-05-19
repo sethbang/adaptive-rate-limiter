@@ -71,11 +71,17 @@ class RateLimitedAsyncIterator(AsyncIterator[T], Generic[T]):
         # On completion, capacity is released with refund
 
     Note:
-        For early break from iteration, use a context manager pattern:
-        async with stream:
+        This class is NOT an async context manager - it implements no
+        __aenter__/__aexit__. For early break from iteration, call aclose()
+        explicitly (e.g. in a finally block) so the reservation is released:
+
+        stream = RateLimitedAsyncIterator(raw_iterator, ctx)
+        try:
             async for chunk in stream:
                 if should_stop:
-                    break  # __aexit__ calls aclose() for cleanup
+                    break
+        finally:
+            await stream.aclose()  # releases the reservation
     """
 
     __slots__ = (
@@ -109,8 +115,9 @@ class RateLimitedAsyncIterator(AsyncIterator[T], Generic[T]):
         """
         Update last activity time for background cleanup.
 
-        Records chunk receipt on the context and updates the in-flight
-        tracker's activity timestamp.
+        Records chunk receipt on the context, updating its last_chunk_at
+        timestamp, which the background cleanup task reads directly to
+        determine whether a stream is still active.
         """
         self._ctx.record_chunk()
 
@@ -337,7 +344,7 @@ class RateLimitedAsyncIterator(AsyncIterator[T], Generic[T]):
         Explicit close with cleanup.
 
         Called when:
-        - User breaks from async for early (via context manager __aexit__)
+        - User breaks from async for early (caller invokes aclose() explicitly)
         - Explicit close() call on the stream
         - Garbage collection with active stream
 

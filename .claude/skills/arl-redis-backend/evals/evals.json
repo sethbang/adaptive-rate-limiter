@@ -1,0 +1,36 @@
+{
+  "skill_name": "arl-redis-backend",
+  "evals": [
+    {
+      "id": 1,
+      "prompt": "My adaptive-rate-limiter setup runs on a single instance with MemoryBackend. Switch it to a distributed Redis backend so multiple workers share rate-limit state.",
+      "expected_output": "Code constructing RedisBackend and wiring it through StateManager into create_scheduler.",
+      "files": [],
+      "expectations": [
+        "Constructs a RedisBackend instance",
+        "Imports RedisBackend from adaptive_rate_limiter at point of use rather than adding an eager top-level import",
+        "Passes the backend through StateManager into create_scheduler"
+      ]
+    },
+    {
+      "id": 2,
+      "prompt": "I edited one of the Lua reservation scripts in adaptive-rate-limiter to change reservation semantics. What else do I need to do?",
+      "expected_output": "Explains the Python caller must change with the Lua script and tests must run against real Redis.",
+      "files": [],
+      "expectations": [
+        "States the Python caller of the Lua script must be updated to match",
+        "States the change must be verified against a real Redis (requires_redis_pool or cluster tests), not just fakeredis"
+      ]
+    },
+    {
+      "id": 3,
+      "prompt": "Importing my module fails with an ImportError mentioning the redis extra, even though most code paths never touch Redis. What went wrong with my adaptive-rate-limiter usage?",
+      "expected_output": "Identifies an eager import of RedisBackend and recommends a lazy point-of-use import.",
+      "files": [],
+      "expectations": [
+        "Identifies that RedisBackend is being imported eagerly at module top level",
+        "Recommends importing RedisBackend lazily at point of use to preserve the optional-extra boundary"
+      ]
+    }
+  ]
+}

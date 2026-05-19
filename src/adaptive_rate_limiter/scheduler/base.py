@@ -249,10 +249,10 @@ class BaseScheduler(ABC):
             UnifiedMetricsCollector instance or None if metrics disabled
 
         Security Note:
-            The default prometheus_host is "0.0.0.0" (all interfaces) for security.
-            To expose metrics externally (e.g., in containerized environments), set
-            config.prometheus_host = "0.0.0.0" and ensure network-level security
-            controls are in place.
+            The default prometheus_host is "0.0.0.0", which binds to all interfaces
+            and exposes metrics externally. To restrict access (e.g., localhost-only
+            in non-containerized deployments), set config.prometheus_host = "127.0.0.1"
+            and ensure network-level security controls are in place.
         """
         if not self.metrics_enabled:
             return None
@@ -682,9 +682,11 @@ class BaseScheduler(ABC):
                           True without any action (caller must handle the drop).
 
         Returns:
-            bool: True if overflow occurred and was handled (drop_oldest policy),
-                  False if no overflow. Never returns True for 'reject' policy
-                  because it raises an exception instead.
+            bool: True if overflow occurred and no drop_callback was provided
+                  (caller must handle the drop manually). False if no overflow,
+                  or if overflow was handled by invoking drop_callback. Never
+                  returns True for 'reject' policy because it raises an
+                  exception instead.
 
         Raises:
             QueueOverflowError: If overflow_policy is 'reject' and queue is full

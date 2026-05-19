@@ -232,7 +232,7 @@ class RedisBackend(BaseBackend):
     - Atomic Lua scripts for all operations
 
     Deployment Requirements:
-    - Redis 2.6+ (for Lua bit library)
+    - Redis 2.6+ (for EVALSHA / Lua scripting support)
     - Redis Cluster mode recommended for production multi-key atomicity
     """
 

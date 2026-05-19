@@ -1,0 +1,60 @@
+{
+  "skill_name": "arl-integrate",
+  "evals": [
+    {
+      "id": 1,
+      "prompt": "I have an httpx-based client for an OpenAI-compatible chat API. Show me how to rate-limit my chat completion calls using the adaptive-rate-limiter library that's already a dependency in this project.",
+      "expected_output": "Code that implements ClientProtocol, builds a scheduler via create_scheduler, and submits a request through it.",
+      "files": [],
+      "expectations": [
+        "Defines a client class exposing base_url, timeout, and get_headers matching ClientProtocol",
+        "Builds the scheduler with create_scheduler() rather than instantiating Scheduler() directly",
+        "Enters the scheduler as an async context manager (async with scheduler)",
+        "Calls submit_request with a RequestMetadata object and an async request callable"
+      ]
+    },
+    {
+      "id": 2,
+      "prompt": "I'm using adaptive-rate-limiter for a small side project that just needs basic retry behavior, nothing fancy. Which scheduler mode should I pick and why?",
+      "expected_output": "Recommends basic mode and explains it is pass-through with retry needing no provider or classifier.",
+      "files": [],
+      "expectations": [
+        "Recommends the basic mode",
+        "Explains basic mode is pass-through with retry",
+        "Notes that basic mode does not require a provider or classifier"
+      ]
+    },
+    {
+      "id": 3,
+      "prompt": "I'm building a multi-tenant SaaS with adaptive-rate-limiter where each customer account has its own API quota. Set up the scheduler appropriately.",
+      "expected_output": "Recommends account mode and creates the scheduler with create_scheduler(mode=\"account\").",
+      "files": [],
+      "expectations": [
+        "Recommends the account mode for per-account quota tracking",
+        "Creates the scheduler via create_scheduler with mode set to account",
+        "Does not instantiate Scheduler directly"
+      ]
+    },
+    {
+      "id": 4,
+      "prompt": "I'm building a debugging dashboard for my adaptive-rate-limiter integration and need the scheduler's internal queue depth. Poking around I found I can read it from `scheduler._mode_strategy` and a few other underscore-prefixed attributes. Should I build the dashboard on those?",
+      "expected_output": "Warns against depending on underscore-prefixed private attributes and points to the public API surface.",
+      "files": [],
+      "expectations": [
+        "States that underscore-prefixed names such as _mode_strategy are private API, not part of the public surface",
+        "Warns that private names may change between any versions and can break on upgrade",
+        "Directs the user to public exports or supported metrics/observability rather than private attributes"
+      ]
+    },
+    {
+      "id": 5,
+      "prompt": "Review this adaptive-rate-limiter snippet for correctness: `scheduler = create_scheduler(client=MyClient(), mode=\"intelligent\"); result = await scheduler.submit_request(metadata, request_func); response_json = result.json()`",
+      "expected_output": "Flags that the scheduler is not entered as an async context manager and that intelligent-mode submit_request does not return a raw HTTP response.",
+      "files": [],
+      "expectations": [
+        "Identifies that the scheduler must be entered with async with before submit_request is called",
+        "Identifies that submit_request's return type is mode-dependent and intelligent mode does not return the raw HTTP response, so calling result.json() is incorrect"
+      ]
+    }
+  ]
+}

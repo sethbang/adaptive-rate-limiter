@@ -1,0 +1,37 @@
+{
+  "skill_name": "arl-streaming",
+  "evals": [
+    {
+      "id": 1,
+      "prompt": "I'm consuming an SSE stream from an LLM API through adaptive-rate-limiter and want the unused token capacity returned. How do I wrap the stream?",
+      "expected_output": "Code wrapping the raw iterator with RateLimitedAsyncIterator and a StreamingReservationContext.",
+      "files": [],
+      "expectations": [
+        "Constructs a StreamingReservationContext with reserved_tokens and a backend",
+        "Wraps the raw iterator with RateLimitedAsyncIterator",
+        "Explains that unused token capacity is refunded when the stream completes"
+      ]
+    },
+    {
+      "id": 2,
+      "prompt": "My adaptive-rate-limiter code breaks out of the streaming loop early when it finds what it needs, and rate-limit capacity seems to leak. How do I fix it?",
+      "expected_output": "Recommends explicitly calling await stream.aclose() (e.g. in try/finally) on early break, since the iterator is not an async context manager.",
+      "files": [],
+      "expectations": [
+        "Recommends explicitly calling await stream.aclose() when breaking out of the loop early, for example in a try/finally block",
+        "Explains that the iterator does not auto-release on early break and aclose() runs the refund-based release"
+      ]
+    },
+    {
+      "id": 3,
+      "prompt": "Explain how refund-based token accounting works for streaming in adaptive-rate-limiter.",
+      "expected_output": "Describes the optimistic reservation and refund-on-completion model.",
+      "files": [],
+      "expectations": [
+        "States an optimistic token estimate is reserved before the stream starts",
+        "States unused capacity is refunded when the stream completes",
+        "Notes the reserve and refund paths must stay consistent"
+      ]
+    }
+  ]
+}

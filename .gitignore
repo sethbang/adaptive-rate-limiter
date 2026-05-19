@@ -36,5 +36,12 @@ tests/reports
 docs/architecture
 .vscode
 
-# Claude Code local session/settings dir
-.claude/
+# Claude Code local session/settings dir (but track shared skills)
+.claude/*
+!.claude/skills/
+
+# skill-creator benchmark workspaces (build artifacts, not source)
+.claude/skills/*-workspace/
+
+# Superpowers process artifacts (specs, plans) — never tracked
+docs/superpowers/

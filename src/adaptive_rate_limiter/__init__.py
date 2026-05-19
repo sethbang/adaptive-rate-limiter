@@ -24,7 +24,7 @@ Quick Start:
     ...     @property
     ...     def timeout(self) -> float:
     ...         return 30.0
-    ...     def get_headers(self) -> dict:
+    ...     def get_headers(self) -> dict[str, str]:
     ...         return {"Authorization": "Bearer ..."}
     >>>
     >>> scheduler = create_scheduler(client=MyClient(), mode="intelligent")
@@ -42,7 +42,7 @@ Main Exports:
 Note: RedisBackend requires the 'redis' extra. Install with:
     pip install adaptive-rate-limiter[redis]
 
-Version: 1.0.2
+Version: 1.1.0
 """
 
 __version__ = "1.1.0"

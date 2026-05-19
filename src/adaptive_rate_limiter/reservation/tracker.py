@@ -387,8 +387,8 @@ class ReservationTracker:
         instead of O(n) full scan.
 
         Args:
-            cutoff_time: Unix timestamp. Reservations created before this
-                time are considered stale and will be removed.
+            cutoff_time: Monotonic timestamp (time.monotonic()). Reservations
+                created before this time are considered stale and will be removed.
 
         Returns:
             List of stale ReservationContext objects that were removed.
