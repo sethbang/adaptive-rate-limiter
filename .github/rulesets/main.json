@@ -1,0 +1,58 @@
+{
+  "name": "Protect main",
+  "target": "branch",
+  "enforcement": "active",
+  "conditions": {
+    "ref_name": {
+      "include": ["refs/heads/main"],
+      "exclude": []
+    }
+  },
+  "bypass_actors": [
+    {
+      "actor_id": 5,
+      "actor_type": "RepositoryRole",
+      "bypass_mode": "always"
+    }
+  ],
+  "rules": [
+    { "type": "deletion" },
+    { "type": "non_fast_forward" },
+    {
+      "type": "pull_request",
+      "parameters": {
+        "required_approving_review_count": 0,
+        "dismiss_stale_reviews_on_push": true,
+        "require_code_owner_review": false,
+        "require_last_push_approval": false,
+        "required_review_thread_resolution": true,
+        "allowed_merge_methods": ["merge", "squash", "rebase"]
+      }
+    },
+    {
+      "type": "required_status_checks",
+      "parameters": {
+        "strict_required_status_checks_policy": true,
+        "do_not_enforce_on_create": false,
+        "required_status_checks": [
+          { "context": "Lint" },
+          { "context": "Type Check" },
+          { "context": "Security Scan" },
+          { "context": "Build & verify wheel" },
+          { "context": "Test (Python 3.10, ubuntu-latest)" },
+          { "context": "Test (Python 3.10, macos-latest)" },
+          { "context": "Test (Python 3.10, windows-latest)" },
+          { "context": "Test (Python 3.11, ubuntu-latest)" },
+          { "context": "Test (Python 3.11, macos-latest)" },
+          { "context": "Test (Python 3.11, windows-latest)" },
+          { "context": "Test (Python 3.12, ubuntu-latest)" },
+          { "context": "Test (Python 3.12, macos-latest)" },
+          { "context": "Test (Python 3.12, windows-latest)" },
+          { "context": "Test (Python 3.13, ubuntu-latest)" },
+          { "context": "Test (Python 3.13, macos-latest)" },
+          { "context": "Test (Python 3.13, windows-latest)" }
+        ]
+      }
+    }
+  ]
+}
