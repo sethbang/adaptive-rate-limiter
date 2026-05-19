@@ -14,23 +14,31 @@ optional — gated behind the `redis` extra — so the import path matters.
 pip install adaptive-rate-limiter[redis]   # or: uv sync --extra redis
 ```
 
-## Import it lazily — never eagerly
+## Import it inside the function that uses it
 
-`RedisBackend` is exposed through `__getattr__` lazy imports in both
-`adaptive_rate_limiter/__init__.py` and
-`adaptive_rate_limiter/backends/__init__.py`, so the package imports cleanly
-for users who never installed `redis`.
+The package uses `__getattr__` lazy imports so that bare `import
+adaptive_rate_limiter` succeeds even without the `redis` extra. That protects
+the *package* import only — it does not make the `RedisBackend` name free to
+import.
 
-Preserve that. Import it at the point of use:
+`from adaptive_rate_limiter import RedisBackend` triggers that `__getattr__`,
+which imports the `redis` dependency **at the point the import statement
+runs**. Put it at module top level and `redis` becomes a load-time
+requirement — without the extra it raises
+`ImportError: 'RedisBackend' requires the 'redis' extra`.
+
+So import `RedisBackend` inside the function that builds the backend:
 
 ```python
-from adaptive_rate_limiter import RedisBackend   # resolved lazily — OK
+def build_backend():
+    from adaptive_rate_limiter import RedisBackend  # redis loaded only when called
+    return RedisBackend(redis_url="redis://localhost:6379/0")
 ```
 
-Do **not** add an eager top-level `from .backends import RedisBackend` to any
-module — that drags `redis` into every import and breaks installs without the
-extra. The same applies to `FallbackRateLimiter`, `InFlightRequest`, and
-`ModelLimits`.
+Never import it at module top level, and never import from the submodule path
+`from adaptive_rate_limiter.backends.redis import ...` — both pull `redis` in
+at import time and break installs without the extra. The same applies to
+`FallbackRateLimiter`, `InFlightRequest`, and `ModelLimits`.
 
 ## Construct it
 
@@ -61,15 +69,19 @@ shape). Changing one side alone corrupts state. After such a change, run the
 
 ## Wiring it in
 
-A backend reaches the scheduler through the state manager, not directly:
+A backend reaches the scheduler through the state manager, not directly. Keep
+the `RedisBackend` import inside the builder function (`create_scheduler` and
+`StateManager` carry no `redis` dependency, so those stay at module top level):
 
 ```python
-from adaptive_rate_limiter import RedisBackend, create_scheduler
+from adaptive_rate_limiter import create_scheduler
 from adaptive_rate_limiter.scheduler import StateManager
 
-backend = RedisBackend(redis_url="redis://localhost:6379/0")
-state_manager = StateManager(backend=backend)
-scheduler = create_scheduler(
-    client=MyClient(), mode="intelligent", state_manager=state_manager,
-)
+def build_scheduler(client):
+    from adaptive_rate_limiter import RedisBackend  # redis loaded only here
+    backend = RedisBackend(redis_url="redis://localhost:6379/0")
+    state_manager = StateManager(backend=backend)
+    return create_scheduler(
+        client=client, mode="intelligent", state_manager=state_manager,
+    )
 ```
