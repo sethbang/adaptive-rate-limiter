@@ -12,18 +12,15 @@ Classes:
         request's rate limit reservation through its lifecycle.
     RateLimitedAsyncIterator: Async iterator wrapper that adds rate limit
         tracking to streaming responses.
-    StreamingInFlightTracker: Manages in-flight streaming request tracking
-        and background cleanup of hung streams.
     StreamingInFlightEntry: Dataclass for tracking an in-flight streaming request.
 """
 
 from .context import StreamingReservationContext
 from .iterator import RateLimitedAsyncIterator
-from .tracker import StreamingInFlightEntry, StreamingInFlightTracker
+from .tracker import StreamingInFlightEntry
 
 __all__ = [
     "RateLimitedAsyncIterator",
     "StreamingInFlightEntry",
-    "StreamingInFlightTracker",
     "StreamingReservationContext",
 ]
