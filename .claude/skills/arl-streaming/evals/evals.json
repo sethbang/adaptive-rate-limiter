@@ -19,7 +19,7 @@
       "files": [],
       "expectations": [
         "Recommends explicitly calling await stream.aclose() when breaking out of the loop early, for example in a try/finally block",
-        "Explains that the iterator does not auto-release on early break and aclose() runs the refund-based release"
+        "Explains that the iterator does not auto-release on an early break, and that calling aclose() performs the capacity release"
       ]
     },
     {
@@ -31,6 +31,17 @@
         "States an optimistic token estimate is reserved before the stream starts",
         "States unused capacity is refunded when the stream completes",
         "Notes the reserve and refund paths must stay consistent"
+      ]
+    },
+    {
+      "id": 4,
+      "prompt": "I run my adaptive-rate-limiter streaming calls inside asyncio.wait_for() with a timeout. If the timeout fires mid-stream and the task is cancelled, does the rate-limit reservation leak? Do I need a try/finally with aclose() for that?",
+      "expected_output": "Explains that CancelledError/GeneratorExit raised mid-stream are handled automatically by the iterator, so cancellation does not leak the reservation; try/finally aclose() is only needed for an explicit early break.",
+      "files": [],
+      "expectations": [
+        "States that asyncio.CancelledError and GeneratorExit raised mid-stream are handled by RateLimitedAsyncIterator, which releases the reservation before the error propagates",
+        "States that cancelling a streaming task (e.g. via asyncio.wait_for timeout) does not leak the reservation and does not require a try/finally aclose() for the cancellation case",
+        "Does not incorrectly claim cancellation leaks capacity; clarifies aclose()/try-finally is needed only for an explicit early break out of the loop"
       ]
     }
   ]

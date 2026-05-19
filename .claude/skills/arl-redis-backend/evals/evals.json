@@ -31,6 +31,17 @@
         "Identifies that RedisBackend is being imported eagerly at module top level",
         "Recommends importing RedisBackend lazily at point of use to preserve the optional-extra boundary"
       ]
+    },
+    {
+      "id": 4,
+      "prompt": "I construct a RedisBackend directly in my code and use it for rate-limit state, but I'm not going through create_scheduler and not using an async with block. Will the orphan-recovery background task that reclaims expired reservations actually run? What do I need to do?",
+      "expected_output": "Explains the backend must be started for orphan recovery to run: call await backend.start() and await backend.stop(), or use async with.",
+      "files": [],
+      "expectations": [
+        "States that orphan recovery does not start on its own — the RedisBackend must be started for the background recovery task to run",
+        "Recommends calling await backend.start() to begin orphan recovery and await backend.stop() on shutdown, or using async with backend:",
+        "Notes that when the backend is used via StateManager / create_scheduler, the scheduler calls start() and stop() automatically"
+      ]
     }
   ]
 }
