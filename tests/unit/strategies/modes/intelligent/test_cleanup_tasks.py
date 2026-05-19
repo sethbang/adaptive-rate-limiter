@@ -228,8 +228,11 @@ class TestIntelligentModeStrategyResetWatcher:
 
         await strategy._reset_watcher.schedule_watcher("bucket-complete", reset_ts)
 
-        # Wait for watcher to complete
-        await asyncio.sleep(0.15)
+        # Wait deterministically for the watcher task itself to finish
+        # instead of racing a fixed sleep against a coarse timer.
+        assert len(strategy._reset_watcher._reset_tasks) == 1
+        watcher_task = next(iter(strategy._reset_watcher._reset_tasks))
+        await asyncio.wait_for(watcher_task, timeout=5.0)
 
         # Bucket should be removed from waiting set
         assert "bucket-complete" not in strategy._reset_watcher._buckets_waiting
@@ -286,8 +289,9 @@ class TestIntelligentModeStrategyResetWatcher:
 
         await strategy._reset_watcher.schedule_watcher("bucket-past", reset_ts)
 
-        # Allow the task to run
-        await asyncio.sleep(0.02)
+        # Wait deterministically for the fire-and-forget wakeup task to run
+        # instead of racing a fixed sleep against a coarse timer.
+        await asyncio.wait_for(strategy._wakeup_event.wait(), timeout=5.0)
 
         # Should trigger wakeup immediately
         assert strategy._wakeup_event.is_set()
@@ -363,22 +367,29 @@ class TestIntelligentModeStrategyStaleCleanupExceptions:
         strategy.STALE_CLEANUP_INTERVAL = 0.001
 
         call_count = 0
+        continued = asyncio.Event()
 
         async def failing_cleanup():
             nonlocal call_count
             call_count += 1
             if call_count == 1:
                 raise ValueError("Stale cleanup error")
+            # A second call proves the loop survived the exception. Signal
+            # the test deterministically instead of racing a fixed sleep
+            # against a coarse (Windows ~16ms) timer.
+            continued.set()
             return 0
 
         with patch.object(
             strategy, "_cleanup_stale_reservations", side_effect=failing_cleanup
         ):
             task = asyncio.create_task(strategy._cleanup_stale_reservations_loop())
-            await asyncio.sleep(0.02)
-            strategy._running = False
-            task.cancel()
-            with contextlib.suppress(asyncio.CancelledError):
-                await task
+            try:
+                await asyncio.wait_for(continued.wait(), timeout=5.0)
+            finally:
+                strategy._running = False
+                task.cancel()
+                with contextlib.suppress(asyncio.CancelledError):
+                    await task
 
-        assert call_count >= 1
+        assert call_count >= 2

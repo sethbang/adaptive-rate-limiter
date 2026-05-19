@@ -1,7 +1,7 @@
 import asyncio
 import contextlib
-import time
 from collections.abc import Awaitable, Callable
+from datetime import datetime, timedelta, timezone
 from typing import Any
 from unittest.mock import AsyncMock, Mock, patch
 
@@ -15,6 +15,24 @@ from adaptive_rate_limiter.scheduler.base import (
 )
 from adaptive_rate_limiter.scheduler.config import RateLimiterConfig, SchedulerMode
 from adaptive_rate_limiter.types.request import RequestMetadata
+
+
+class _MovableClock:
+    """Controllable datetime.now() replacement for FailedRequestCounter tests.
+
+    FailedRequestCounter compares datetime.now() against window_start to decide
+    when to reset. Driving the clock explicitly makes window expiry exact
+    instead of racing a fixed sleep against a coarse timer.
+    """
+
+    def __init__(self, start: datetime):
+        self._now = start
+
+    def advance(self, seconds: float) -> None:
+        self._now += timedelta(seconds=seconds)
+
+    def now(self, tz=None):
+        return self._now
 
 
 class TestFailedRequestCounter:
@@ -31,16 +49,21 @@ class TestFailedRequestCounter:
 
     def test_window_reset(self):
         """Test that count resets after window expiration."""
-        counter = FailedRequestCounter(max_failures=5, window_seconds=0.1)  # type: ignore
-        counter.increment()
-        assert counter.count == 1
+        clock = _MovableClock(datetime(2026, 1, 1, tzinfo=timezone.utc))
+        with patch(
+            "adaptive_rate_limiter.scheduler.base.datetime", wraps=datetime
+        ) as mock_dt:
+            mock_dt.now.side_effect = clock.now
+            counter = FailedRequestCounter(max_failures=5, window_seconds=0.1)  # type: ignore
+            counter.increment()
+            assert counter.count == 1
 
-        # Wait for window to expire
-        time.sleep(0.15)
+            # Advance the clock past the window
+            clock.advance(0.15)
 
-        # Next increment should reset count
-        assert counter.increment() == 1
-        assert counter.count == 1
+            # Next increment should reset count
+            assert counter.increment() == 1
+            assert counter.count == 1
 
     def test_is_limit_exceeded(self):
         """Test limit checking."""
@@ -57,13 +80,19 @@ class TestFailedRequestCounter:
 
     def test_is_limit_exceeded_window_reset(self):
         """Test limit check resets after window expiration."""
-        counter = FailedRequestCounter(max_failures=1, window_seconds=0.1)  # type: ignore
-        counter.increment()
-        assert counter.is_limit_exceeded()
+        clock = _MovableClock(datetime(2026, 1, 1, tzinfo=timezone.utc))
+        with patch(
+            "adaptive_rate_limiter.scheduler.base.datetime", wraps=datetime
+        ) as mock_dt:
+            mock_dt.now.side_effect = clock.now
+            counter = FailedRequestCounter(max_failures=1, window_seconds=0.1)  # type: ignore
+            counter.increment()
+            assert counter.is_limit_exceeded()
 
-        time.sleep(0.15)
-        assert not counter.is_limit_exceeded()
-        assert counter.count == 0  # Should be reset
+            # Advance the clock past the window
+            clock.advance(0.15)
+            assert not counter.is_limit_exceeded()
+            assert counter.count == 0  # Should be reset
 
 
 class ConcreteScheduler(BaseScheduler):

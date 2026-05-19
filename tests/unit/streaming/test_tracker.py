@@ -19,7 +19,7 @@ import gc
 import time
 import weakref
 from typing import Any
-from unittest.mock import AsyncMock, Mock
+from unittest.mock import AsyncMock, Mock, patch
 
 import pytest
 
@@ -35,6 +35,18 @@ class StaleWrapper:
     def __init__(self) -> None:
         self._released = False
         # Note: No _ctx attribute - simulates iterator that hasn't started
+
+
+def _age_entry(tracker: StreamingInFlightTracker, res_id: str, seconds: float) -> None:
+    """Push an entry's monotonic timestamps ``seconds`` into the past.
+
+    Staleness is measured against time.monotonic(); rewinding the entry's
+    timestamps makes it deterministically stale without sleeping real wall
+    time (which races a coarse ~16ms timer against the activity_timeout).
+    """
+    entry = tracker._streaming_in_flight[res_id]
+    entry.started_at -= seconds
+    entry.last_activity_at -= seconds
 
 
 class TestStreamingInFlightEntry:
@@ -496,8 +508,8 @@ class TestStreamingInFlightTrackerCleanupStale:
         await tracker.register("res-1", "bucket-1", 1000, wrapper)
         assert tracker.active_count == 1
 
-        # Wait for timeout
-        await asyncio.sleep(1.5)
+        # Make the entry deterministically stale (timeout is 1s)
+        _age_entry(tracker, "res-1", 1.5)
 
         cleaned = await tracker._cleanup_stale()
 
@@ -519,8 +531,8 @@ class TestStreamingInFlightTrackerCleanupStale:
 
         await tracker.register("res-1", "bucket-1", 1000, wrapper)
 
-        # Wait for timeout
-        await asyncio.sleep(1.5)
+        # Make the entry deterministically stale (timeout is 1s)
+        _age_entry(tracker, "res-1", 1.5)
 
         await tracker._cleanup_stale()
 
@@ -546,7 +558,8 @@ class TestStreamingInFlightTrackerCleanupStale:
 
         await tracker.register("res-1", "bucket-1", 1000, wrapper)
 
-        await asyncio.sleep(1.5)
+        # Make the entry deterministically stale (timeout is 1s)
+        _age_entry(tracker, "res-1", 1.5)
         await tracker._cleanup_stale()
 
         metrics_callback.assert_called_once_with("bucket-1")
@@ -566,7 +579,8 @@ class TestStreamingInFlightTrackerCleanupStale:
 
         await tracker.register("res-1", "bucket-1", 1000, wrapper)
 
-        await asyncio.sleep(1.5)
+        # Make the entry deterministically stale (timeout is 1s)
+        _age_entry(tracker, "res-1", 1.5)
 
         # Should not raise
         cleaned = await tracker._cleanup_stale()
@@ -588,7 +602,8 @@ class TestStreamingInFlightTrackerCleanupStale:
 
         await tracker.register("res-1", "bucket-1", 1000, wrapper)
 
-        await asyncio.sleep(1.5)
+        # Make the entry deterministically stale (timeout is 1s)
+        _age_entry(tracker, "res-1", 1.5)
 
         # Should not raise
         cleaned = await tracker._cleanup_stale()
@@ -718,12 +733,25 @@ class TestStreamingInFlightTrackerCleanupLoop:
         wrapper = StaleWrapper()
 
         await tracker.register("res-1", "bucket-1", 1000, wrapper)
-        await tracker.start_cleanup()
+        # Make the entry deterministically stale before the loop runs.
+        _age_entry(tracker, "res-1", 2.0)
 
-        # Wait for cleanup to run
-        await asyncio.sleep(2.5)
+        # Wait deterministically for the loop to invoke the stale sweep
+        # instead of racing a fixed sleep against a coarse timer.
+        real_cleanup_stale = tracker._cleanup_stale
+        cleaned_evt = asyncio.Event()
 
-        await tracker.stop_cleanup()
+        async def signalling_cleanup_stale():
+            result = await real_cleanup_stale()
+            cleaned_evt.set()
+            return result
+
+        with patch.object(
+            tracker, "_cleanup_stale", side_effect=signalling_cleanup_stale
+        ):
+            await tracker.start_cleanup()
+            await asyncio.wait_for(cleaned_evt.wait(), timeout=5.0)
+            await tracker.stop_cleanup()
 
         # Entry should have been cleaned
         assert tracker.active_count == 0
@@ -742,12 +770,30 @@ class TestStreamingInFlightTrackerCleanupLoop:
         wrapper = StaleWrapper()
 
         await tracker.register("res-1", "bucket-1", 1000, wrapper)
-        await tracker.start_cleanup()
+        # Make the entry deterministically stale before the loop runs.
+        _age_entry(tracker, "res-1", 2.0)
 
-        # Wait for cleanup to run
-        await asyncio.sleep(2.5)
+        # A second sweep proves the loop survived the first one (which hit a
+        # backend error). Signal the test deterministically instead of racing
+        # a fixed sleep against a coarse timer.
+        real_cleanup_stale = tracker._cleanup_stale
+        call_count = 0
+        survived = asyncio.Event()
 
-        # Tracker should still be running
-        assert tracker._running
+        async def counting_cleanup_stale():
+            nonlocal call_count
+            call_count += 1
+            if call_count >= 2:
+                survived.set()
+            return await real_cleanup_stale()
 
-        await tracker.stop_cleanup()
+        with patch.object(
+            tracker, "_cleanup_stale", side_effect=counting_cleanup_stale
+        ):
+            await tracker.start_cleanup()
+            await asyncio.wait_for(survived.wait(), timeout=5.0)
+
+            # Tracker should still be running
+            assert tracker._running
+
+            await tracker.stop_cleanup()

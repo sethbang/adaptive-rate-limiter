@@ -263,8 +263,9 @@ class TestIntelligentModeStrategyResetWatcher:
 
         await strategy._reset_watcher.schedule_watcher("bucket-1", reset_ts)
 
-        # Allow the background task to run
-        await asyncio.sleep(0.01)
+        # Wait deterministically for the fire-and-forget wakeup task to run
+        # instead of racing a fixed sleep against a coarse timer.
+        await asyncio.wait_for(strategy._wakeup_event.wait(), timeout=5.0)
 
         # Should trigger wakeup immediately
         assert strategy._wakeup_event.is_set()
