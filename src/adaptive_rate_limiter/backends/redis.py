@@ -1834,9 +1834,17 @@ class RedisBackend(BaseBackend):
         return failure_count >= failure_threshold
 
     async def get_rate_limits(self, model: str) -> dict[str, Any]:
-        """Get current rate limit state for a model."""
+        """Get current rate limit state for a model.
+
+        Reads from the Lua-owned hash (``_get_state_key``) which is
+        authoritative for live capacity.  The Pydantic KV snapshot
+        (``_get_kv_state_key`` / ``:rlstate``) uses different field names
+        and must NOT be used here.
+        """
         try:
-            state = await self.get_state(model)
+            redis_client = await self._ensure_connected()
+            state_key = self._get_state_key(model)
+            state = await redis_client.hgetall(state_key)
             if state:
                 return {
                     "rpm_limit": int(state.get("lim_req", 0)),

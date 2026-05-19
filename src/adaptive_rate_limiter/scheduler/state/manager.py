@@ -534,7 +534,9 @@ class StateManager:
                 bucket_id, request_count, token_count or 0, bucket_limits=bucket_limits
             )
 
-            # Sync cache with backend
+            # Sync cache with the persisted RateLimitState snapshot (may be
+            # empty before any headers have been observed; live capacity is
+            # owned by the atomic Lua hash).
             backend_state = await self.backend.get_state(bucket_id)
             if backend_state:
                 try:
