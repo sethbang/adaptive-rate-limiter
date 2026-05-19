@@ -7,7 +7,64 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ## [Unreleased]
 
-_No unreleased changes._
+### Added
+
+- **`ProviderError` exception**: custom providers can now raise
+  `ProviderError` (importable as `from adaptive_rate_limiter import
+  ProviderError`) when rate-limit discovery, response parsing, or
+  bucket-lookup fails. It slots into the existing exception hierarchy under
+  `RateLimiterError`.
+- **`RedisBackend` explicit lifecycle methods**: `RedisBackend.start()` and
+  `stop()` are now public. Orphan-reservation recovery starts automatically
+  when the backend is activated through `StateManager` or `create_scheduler`,
+  not only when used as an `async with` context manager.
+- **Config validation**: eleven additional `RateLimiterConfig` numeric fields
+  now validate their values in `__post_init__` and raise `ValueError` on bad
+  input: `request_timeout`, `scheduler_interval`, `backoff_base`,
+  `max_backoff`, `failure_window`, `max_failures`, `health_check_interval`,
+  `max_consecutive_failures`, `metrics_export_interval`, `prometheus_port`,
+  and `test_rate_multiplier`.
+
+### Changed
+
+- **Public API surface**: the library now documents seven public
+  sub-packages — `observability`, `streaming`, `reservation`, and `providers`
+  join the original three (`adaptive_rate_limiter`, `scheduler`, `backends`).
+  Imports from those sub-packages are supported and stable.
+- **Redis rate-limit updates**: the Lua update scripts now apply server-sent
+  rate-limit *decreases* (e.g. tier downgrades) as well as increases.
+  Previously, a lower limit reported by the server was silently ignored.
+- **`RedisBackend` state storage**: `RateLimitState` key-value snapshots are
+  stored under a distinct Redis key, separate from the atomic Lua reservation
+  hash. This prevents the two write paths from corrupting each other.
+
+### Removed
+
+- **`StreamingInFlightTracker` (breaking)**: `StreamingInFlightTracker` has
+  been removed from `adaptive_rate_limiter.streaming`. It was unused dead code
+  and had no effect on runtime behaviour. Stale-streaming cleanup continues to
+  work internally. `StreamingInFlightEntry` is **not** affected and remains
+  available.
+
+### Fixed
+
+- **Streaming cancellation**: streaming reservations are now released
+  immediately on task cancellation (`asyncio.CancelledError`) or generator
+  close (`GeneratorExit`) instead of being leaked until background cleanup
+  runs.
+- **ACCOUNT mode concurrency**: the per-account concurrency cap is now
+  enforced with a semaphore, closing a race where the limit could be exceeded
+  under concurrent submissions.
+- **Cold-start probe atomicity**: check-and-claim for cold-start probes is now
+  atomic across resource types, preventing multiple concurrent callers from
+  each believing they own the probe slot.
+- **Signal-handler state flush**: the signal handler and the scheduler's
+  normal write path now share a single lock. Fire-and-forget Redis background
+  tasks are retained against garbage collection so they cannot be silently
+  dropped mid-flight.
+- **Backoff jitter**: jitter is now derived from `random.random()` rather than
+  a time-derived seed, eliminating correlated backoffs across callers that
+  retry at the same instant.
 
 ## [1.1.0] - 2026-05-19
 
