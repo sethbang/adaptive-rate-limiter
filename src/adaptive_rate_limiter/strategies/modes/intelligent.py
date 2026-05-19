@@ -785,6 +785,14 @@ class IntelligentModeStrategy(BaseSchedulingModeStrategy):
         # Extract bucket_id from queue_key to avoid redundant provider calls
         bucket_id = self._extract_bucket_id_from_queue_key(queue_key)
 
+        # owns_probe tracks whether THIS coroutine currently holds the probe
+        # slot for bucket_id.  It is threaded through to
+        # _execute_request_with_tracking so the finally block there releases
+        # the slot only when this request genuinely owns it — not on a bare
+        # set-membership check that could incorrectly release a slot held by a
+        # concurrently-running request for the same bucket.
+        owns_probe = False
+
         if bucket_id and self.state_manager:
             state = await self.state_manager.get_state(bucket_id)
             # If state is unverified (never updated from headers), enforce probing
@@ -792,15 +800,18 @@ class IntelligentModeStrategy(BaseSchedulingModeStrategy):
                 if not await self._try_acquire_probe(bucket_id):
                     # Probe already active for this bucket, wait
                     return False
+                owns_probe = True
                 logger.info(f"Starting cold start probe for bucket {bucket_id}")
                 # Proceed to reserve capacity for the probe
 
         if not await self._check_and_reserve_capacity_intelligent(
             request.metadata, schedule_watcher=False, bucket_id=bucket_id
         ):
-            # If reservation failed, we must clear the probe flag if we set it
-            if bucket_id:
+            # First capacity check failed.  Release the probe slot (if owned)
+            # so the bucket is unblocked while we do the force-refresh retry.
+            if owns_probe and bucket_id:
                 await self._release_probe(bucket_id)
+                owns_probe = False
 
             logger.debug(
                 f"Capacity check failed for request {request.metadata.request_id}"
@@ -831,11 +842,18 @@ class IntelligentModeStrategy(BaseSchedulingModeStrategy):
                             schedule_watcher=False,
                             bucket_id=bucket_id,
                         ):
-                            # Retry successful! Re-claim the probe slot so the
-                            # in-flight probe still gates concurrent requests
-                            # until this request completes (cleared in finally).
+                            # Retry successful!  Attempt to re-claim the probe
+                            # slot so the in-flight probe still gates concurrent
+                            # requests until this request completes (cleared in
+                            # finally via owns_probe).  Between the release
+                            # above and this re-claim there were real await
+                            # points (get_state, check_and_reserve), so another
+                            # coroutine for the same bucket_id may have grabbed
+                            # the slot.  Capture the return value: True means
+                            # we now own it; False means we do NOT own it and
+                            # must not release it in the finally block.
                             if bucket_id:
-                                await self._try_acquire_probe(bucket_id)
+                                owns_probe = await self._try_acquire_probe(bucket_id)
                             # Proceed to process request
                         else:
                             # Retry failed - Schedule Watcher
@@ -869,10 +887,12 @@ class IntelligentModeStrategy(BaseSchedulingModeStrategy):
             if queue_info:
                 await queue_info.update_on_dequeue()
 
-            # Create tracked task with proper resource management
+            # Create tracked task with proper resource management.
+            # owns_probe is forwarded so the task's finally block knows whether
+            # it should release the probe slot for this bucket.
             task = asyncio.create_task(
                 self._execute_request_with_tracking(
-                    request_to_process, task_id, bucket_id
+                    request_to_process, task_id, bucket_id, owns_probe=owns_probe
                 )
             )
 
@@ -1200,7 +1220,11 @@ class IntelligentModeStrategy(BaseSchedulingModeStrategy):
             return self._active_request_count < self.max_concurrent_requests
 
     async def _execute_request_with_tracking(
-        self, request: QueuedRequest, task_id: str, bucket_id: str | None = None
+        self,
+        request: QueuedRequest,
+        task_id: str,
+        bucket_id: str | None = None,
+        owns_probe: bool = False,
     ) -> None:
         """
         Execute request with guaranteed cleanup and streaming detection.
@@ -1345,8 +1369,13 @@ class IntelligentModeStrategy(BaseSchedulingModeStrategy):
             await self._update_metrics_for_request(request.metadata, "requests_failed")
 
         finally:
-            # Clear probe flag if this was a probe
-            if bucket_id and bucket_id in self._bucket_probes:
+            # Release probe only if THIS request owns it.  A bare membership
+            # check (_bucket_probes contains bucket_id) is insufficient: if the
+            # initial reserve failed, the probe was released and another
+            # coroutine may have acquired it before the retry re-claim here.
+            # The owns_probe flag tracks actual ownership so we never
+            # accidentally release another request's probe slot.
+            if owns_probe and bucket_id:
                 await self._release_probe(bucket_id)
                 logger.debug(f"Cold start probe finished for bucket {bucket_id}")
                 # Wake up scheduler to process queued requests (fire-and-forget with exception handling)

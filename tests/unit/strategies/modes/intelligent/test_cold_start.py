@@ -141,3 +141,88 @@ class TestIntelligentModeStrategyColdStartProbe:
             *(strategy._try_acquire_probe(bucket_id) for _ in range(10))
         )
         assert sum(results) == 1, "exactly one concurrent probe may start"
+
+    @pytest.mark.asyncio
+    async def test_execute_request_with_tracking_does_not_release_probe_when_reclaim_failed(
+        self, strategy
+    ):
+        """
+        Regression: if retry re-claim returns False (another coroutine owns the
+        probe slot), _execute_request_with_tracking must NOT release that other
+        coroutine's probe slot.
+
+        Scenario:
+          1. Request A acquires probe for bucket-1.
+          2. First capacity check fails; A releases the probe.
+          3. State refreshes and shows capacity; A retries — but between steps 2
+             and 3, Request B has taken the probe slot (simulated by pre-loading
+             it).  A's re-claim therefore returns False.
+          4. A calls _execute_request_with_tracking with owns_probe=False.
+          5. After A's cleanup finally block runs, bucket-1 must STILL be in
+             _bucket_probes (B's slot is intact).
+        """
+        bucket_id = "bucket-1"
+
+        # Simulate request B having taken the probe slot.
+        strategy._bucket_probes.add(bucket_id)
+
+        # owns_probe=False: request A does NOT own the slot.
+        request = QueuedRequest(
+            metadata=RequestMetadata(
+                request_id="req-A",
+                model_id="test-model",
+                resource_type="chat",
+            ),
+            request_func=AsyncMock(return_value="ok"),
+            future=asyncio.Future(),
+            queue_entry_time=datetime.now(timezone.utc),
+        )
+        task_id = "bucket-1:chat:req-A"
+
+        # Track task so finally block can clean it up properly.
+        async with strategy._task_lock:
+            strategy._active_request_count += 1
+
+        await strategy._execute_request_with_tracking(
+            request, task_id, bucket_id=bucket_id, owns_probe=False
+        )
+
+        # After A finishes, bucket-1 must still be held (B's slot is intact).
+        assert bucket_id in strategy._bucket_probes, (
+            "Request A must not release a probe slot it does not own"
+        )
+
+    @pytest.mark.asyncio
+    async def test_execute_request_with_tracking_releases_probe_when_owned(
+        self, strategy
+    ):
+        """
+        Positive case: when owns_probe=True the finally block MUST release the
+        probe slot so future requests are not permanently blocked.
+        """
+        bucket_id = "bucket-1"
+        strategy._bucket_probes.add(bucket_id)
+
+        request = QueuedRequest(
+            metadata=RequestMetadata(
+                request_id="req-owner",
+                model_id="test-model",
+                resource_type="chat",
+            ),
+            request_func=AsyncMock(return_value="ok"),
+            future=asyncio.Future(),
+            queue_entry_time=datetime.now(timezone.utc),
+        )
+        task_id = "bucket-1:chat:req-owner"
+
+        async with strategy._task_lock:
+            strategy._active_request_count += 1
+
+        await strategy._execute_request_with_tracking(
+            request, task_id, bucket_id=bucket_id, owns_probe=True
+        )
+
+        # The owning request must have released the slot.
+        assert bucket_id not in strategy._bucket_probes, (
+            "Request that owns the probe must release it in its finally block"
+        )
