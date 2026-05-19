@@ -59,6 +59,7 @@ from .exceptions import (
     BucketNotFoundError,
     CapacityExceededError,
     ConfigurationError,
+    ProviderError,
     QueueOverflowError,
     RateLimiterError,
     ReservationCapacityError,
@@ -124,6 +125,7 @@ __all__ = [
     "DiscoveredBucket",
     "MemoryBackend",
     # Providers
+    "ProviderError",
     "ProviderInterface",
     "QueueOverflowError",
     "QueuedRequest",
