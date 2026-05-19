@@ -928,6 +928,42 @@ class TestRateLimitedAsyncIteratorContextProperty:
         assert iterator.context is context
 
 
+class TestRateLimitedAsyncIteratorCancellation:
+    """Tests for cancellation handling in RateLimitedAsyncIterator.__anext__."""
+
+    @pytest.mark.asyncio
+    async def test_cancellation_during_anext_releases_capacity(self) -> None:
+        """A CancelledError inside __anext__ must release the reservation."""
+        import asyncio
+
+        released: list[tuple[Any, Any]] = []
+
+        class _Backend:
+            async def release_streaming_reservation(self, *a: Any, **kw: Any) -> None:
+                released.append((a, kw))
+
+        async def _never_yields() -> AsyncIterator[dict[str, str]]:
+            await asyncio.Event().wait()  # blocks forever
+            yield {}  # pragma: no cover
+
+        ctx = StreamingReservationContext(
+            reservation_id="res-cancel",
+            bucket_id="bucket-cancel",
+            request_id="req-cancel",
+            reserved_tokens=1000,
+            backend=_Backend(),
+        )
+        wrapped = RateLimitedAsyncIterator(_never_yields(), ctx)
+
+        task = asyncio.create_task(wrapped.__anext__())
+        await asyncio.sleep(0.01)
+        task.cancel()
+        with pytest.raises(asyncio.CancelledError):
+            await task
+
+        assert len(released) == 1, "reservation must be released on cancellation"
+
+
 class TestRateLimitedAsyncIteratorLongRunningWarning:
     """Tests for long-running stream warning functionality."""
 
