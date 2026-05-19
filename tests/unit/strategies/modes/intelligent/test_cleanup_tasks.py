@@ -57,24 +57,31 @@ class TestIntelligentModeStrategyCleanupLoopExceptions:
         strategy._cleanup_interval = 0.001
 
         call_count = 0
+        continued = asyncio.Event()
 
         async def failing_cleanup():
             nonlocal call_count
             call_count += 1
             if call_count == 1:
                 raise ValueError("Test cleanup error")
+            # A second call proves the loop survived the exception. Signal
+            # the test deterministically instead of racing a fixed sleep
+            # against a coarse (Windows ~16ms) timer.
+            continued.set()
 
         with patch.object(
             strategy, "_cleanup_completed_tasks", side_effect=failing_cleanup
         ):
             task = asyncio.create_task(strategy._cleanup_loop())
-            await asyncio.sleep(0.02)
-            strategy._running = False
-            task.cancel()
-            with contextlib.suppress(asyncio.CancelledError):
-                await task
+            try:
+                await asyncio.wait_for(continued.wait(), timeout=5.0)
+            finally:
+                strategy._running = False
+                task.cancel()
+                with contextlib.suppress(asyncio.CancelledError):
+                    await task
 
-        assert call_count >= 1
+        assert call_count >= 2
 
     @pytest.mark.asyncio
     async def test_streaming_cleanup_loop_handles_exception(self, strategy, caplog):
@@ -84,12 +91,17 @@ class TestIntelligentModeStrategyCleanupLoopExceptions:
         strategy._streaming_cleanup_manager._cleanup_interval = 0.001
 
         call_count = 0
+        continued = asyncio.Event()
 
         async def failing_cleanup():
             nonlocal call_count
             call_count += 1
             if call_count == 1:
                 raise ValueError("Streaming cleanup error")
+            # A second call proves the loop survived the exception. Signal
+            # the test deterministically instead of racing a fixed sleep
+            # against a coarse (Windows ~16ms) timer.
+            continued.set()
             return 0
 
         with patch.object(
@@ -100,13 +112,15 @@ class TestIntelligentModeStrategyCleanupLoopExceptions:
             task = asyncio.create_task(
                 strategy._streaming_cleanup_manager._cleanup_loop()
             )
-            await asyncio.sleep(0.02)
-            strategy._streaming_cleanup_manager._running = False
-            task.cancel()
-            with contextlib.suppress(asyncio.CancelledError):
-                await task
+            try:
+                await asyncio.wait_for(continued.wait(), timeout=5.0)
+            finally:
+                strategy._streaming_cleanup_manager._running = False
+                task.cancel()
+                with contextlib.suppress(asyncio.CancelledError):
+                    await task
 
-        assert call_count >= 1
+        assert call_count >= 2
 
 
 # ============================================================================

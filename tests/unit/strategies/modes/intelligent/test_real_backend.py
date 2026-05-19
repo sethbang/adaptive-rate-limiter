@@ -7,7 +7,7 @@ MemoryBackend + real StateManager so the reservation logic - the exact
 seam where the audit's concurrency bugs live - is genuinely exercised.
 """
 
-from unittest.mock import AsyncMock, Mock
+from unittest.mock import AsyncMock, Mock, patch
 
 import pytest
 
@@ -19,6 +19,22 @@ from adaptive_rate_limiter.types.rate_limit import RateLimitBucket
 from adaptive_rate_limiter.types.request import RequestMetadata
 
 BUCKET_ID = "bucket-real"
+
+
+@pytest.fixture(autouse=True)
+def _frozen_wall_clock():
+    """Freeze ``time.time()`` for every test in this module.
+
+    MemoryBackend runs a token-bucket refill keyed on wall-clock elapsed
+    time (``tpm_limit / 60`` tokens per second — ~167/s here). These tests
+    assert exact post-reservation token/request counts, so even the few
+    milliseconds between seeding state and reserving capacity would refill
+    a token or two and flake the assertions (``assert 901 == 900``).
+    Freezing the clock makes elapsed time exactly zero, so the refill
+    contributes nothing and the decrements are exact.
+    """
+    with patch("time.time", return_value=1_700_000_000.0):
+        yield
 
 
 @pytest.fixture
