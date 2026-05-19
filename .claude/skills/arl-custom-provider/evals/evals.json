@@ -32,6 +32,26 @@
         "Implements get_bucket_for_model as an async method returning a string",
         "Explains that returning model_id itself is a safe fallback for unknown models"
       ]
+    },
+    {
+      "id": 4,
+      "prompt": "In my adaptive-rate-limiter provider the upstream API only sometimes sends the `x-ratelimit-remaining-tokens` header. When that header is missing, what should parse_rate_limit_response put in RateLimitInfo.tpm_remaining — should I carry forward the last known value or derive it from the limit?",
+      "expected_output": "Says missing rate-limit fields must be left as None, never estimated or carried forward.",
+      "files": [],
+      "expectations": [
+        "States that when a rate-limit header is absent the corresponding RateLimitInfo field must be left as None",
+        "States the provider must not estimate, carry forward, or otherwise guess missing rate-limit values"
+      ]
+    },
+    {
+      "id": 5,
+      "prompt": "I'm writing a custom provider and want discover_limits to return the same bucket type the scheduler uses internally. I found `RateLimitBucket` in adaptive_rate_limiter/types. Should discover_limits return dict[str, RateLimitBucket]?",
+      "expected_output": "Says to use DiscoveredBucket, not the internal RateLimitBucket type.",
+      "files": [],
+      "expectations": [
+        "States that discover_limits must return DiscoveredBucket objects (dict[str, DiscoveredBucket]), not RateLimitBucket",
+        "Notes that RateLimitBucket and the internal types module are not part of the public API and should not be relied on"
+      ]
     }
   ]
 }
