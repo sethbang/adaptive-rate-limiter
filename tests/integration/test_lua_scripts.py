@@ -704,6 +704,71 @@ class TestUpdateRateLimits:
         assert result == 0, "Should reject negative remaining"
 
     @pytest.mark.asyncio
+    async def test_update_accepts_limit_decrease(self, redis, script_shas):
+        """Test that a server-reported limit decrease is honored (not silently ignored).
+
+        When a server tier is downgraded mid-window the header limit will be lower
+        than the stored limit.  Using math.max() would keep the old high value and
+        cause over-admission.  The header must be treated as authoritative.
+        """
+        update_sha = script_shas["distributed_update_rate_limits"]
+        keys = get_keys(req_id="decrease-test")
+        state_key, pend_req_key, pend_tok_key, req_map_key = keys
+
+        # Seed state with a HIGH limit (simulating a previous tier)
+        now = int(time.time())
+        await redis.hset(
+            state_key,
+            mapping={
+                "v": "1",
+                "rem_req": "1000",
+                "rem_tok": "100000",
+                "lim_req": "1000",  # HIGH stored limit
+                "lim_tok": "100000",
+                "rst_req": str(now + 60),
+                "rst_tok": str(now + 60),
+                "gen_req": "0",
+                "gen_tok": "0",
+            },
+        )
+        # Seed pending gauges at 0
+        await redis.set(pend_req_key, "0")
+        await redis.set(pend_tok_key, "0")
+        # Seed a request mapping so the script proceeds past the mapping check
+        # Format: gen_req:gen_tok:cost_req:cost_tok
+        await redis.set(req_map_key, "0:0:1:10")
+
+        # Run update with a LOWER limit reported by the server (tier downgrade).
+        # head_rst_tok_delta=60 ensures calc_rst_tok = now+60 >= rst_tok(now+60)-10,
+        # so the token-window branch is entered and lim_tok is updated.
+        result = await redis.evalsha(
+            update_sha,
+            4,
+            *keys,
+            90,  # head_rem_req
+            9000,  # head_rem_tok
+            100,  # head_lim_req  <-- LOWER than stored 1000
+            10000,  # head_lim_tok  <-- LOWER than stored 100000
+            now + 60,  # head_rst_req (absolute unix ts, well above 1600000000)
+            60,  # head_rst_tok_delta: calc_rst_tok=now+60 passes staleness check
+            10,  # stale_buffer
+            120,  # max_tok_delta
+        )
+
+        assert result == 1, "Script should return 1 (success)"
+
+        state = await redis.hgetall(state_key)
+        stored_lim_req = int(state[b"lim_req"])
+        assert stored_lim_req == 100, (
+            f"Limit decrease must be applied: expected 100, got {stored_lim_req}. "
+            "math.max() keeps the old high value — header must be authoritative."
+        )
+        stored_lim_tok = int(state[b"lim_tok"])
+        assert stored_lim_tok == 10000, (
+            f"Token limit decrease must be applied: expected 10000, got {stored_lim_tok}."
+        )
+
+    @pytest.mark.asyncio
     async def test_update_fails_without_mapping(self, redis, script_shas):
         """Test update fails when request mapping doesn't exist."""
         update_sha = script_shas["distributed_update_rate_limits"]
