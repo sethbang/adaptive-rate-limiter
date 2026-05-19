@@ -210,6 +210,14 @@ class BaseSchedulingModeStrategy(ABC):
         """
         pass
 
+    def _is_rate_limit_error(self, error: Exception) -> bool:
+        """Check if an exception represents a rate-limit (HTTP 429) error."""
+        error_name = type(error).__name__.lower()
+        if "ratelimit" in error_name:
+            return True
+        status_code = getattr(error, "status_code", None)
+        return bool(status_code == 429)
+
     def is_running(self) -> bool:
         """
         Check if this strategy is running.

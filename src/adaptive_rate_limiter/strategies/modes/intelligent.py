@@ -1393,15 +1393,6 @@ class IntelligentModeStrategy(BaseSchedulingModeStrategy):
         async with self._bucket_probe_lock:
             self._bucket_probes.discard(bucket_id)
 
-    def _is_rate_limit_error(self, error: Exception) -> bool:
-        """Check if an exception is a rate limit error."""
-        error_name = type(error).__name__.lower()
-        if "ratelimit" in error_name:
-            return True
-
-        status_code = getattr(error, "status_code", None)
-        return status_code == 429
-
     # ===== BACKGROUND TASKS =====
 
     async def _start_cleanup_task(self) -> None:
