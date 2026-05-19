@@ -318,19 +318,30 @@ class TestCacheCleanupLoopEdgeCases:
         config = StateConfig(cleanup_interval=0.01)
         cache = Cache(config)
 
-        await cache.start()
+        # A second call proves the loop survived the first error. Signal the
+        # test deterministically instead of racing a fixed sleep against a
+        # coarse (Windows ~16ms) timer.
+        call_count = 0
+        errored = asyncio.Event()
+
+        async def failing_cleanup():
+            nonlocal call_count
+            call_count += 1
+            if call_count >= 2:
+                errored.set()
+            raise RuntimeError("cleanup error")
 
         # Patch _cleanup_expired to raise
         with (
-            patch.object(
-                cache, "_cleanup_expired", side_effect=RuntimeError("cleanup error")
-            ),
+            patch.object(cache, "_cleanup_expired", side_effect=failing_cleanup),
             caplog.at_level(logging.ERROR),
         ):
-            await asyncio.sleep(0.03)  # Let it run and encounter error
+            await cache.start()
+            await asyncio.wait_for(errored.wait(), timeout=5.0)
 
-        # Should still be running (error logged but not fatal)
-        assert cache._running
+            # Should still be running (error logged but not fatal)
+            assert cache._running
+            assert call_count >= 2
 
         await cache.stop()
 

@@ -244,29 +244,39 @@ class TestBackgroundLoopExceptions:
         manager._running = True
         manager.config.batch_timeout = 0.01
 
-        # Add entry and make flush fail
+        # Add entry so the loop triggers a flush.
         entry = StateEntry(key="test", data={})
         async with manager._batch_lock:
             manager._pending_updates.append(PendingUpdate(entry=entry, retry_count=0))
 
-        manager.backend.set_state.side_effect = OSError("Backend error")
+        # A second call proves the loop survived the first error. Signal the
+        # test deterministically instead of racing a fixed sleep.
+        call_count = 0
+        errored = asyncio.Event()
+
+        async def failing_flush():
+            nonlocal call_count
+            call_count += 1
+            if call_count >= 2:
+                errored.set()
+            raise OSError("Backend error")
 
         # Run batch loop briefly
-        task = asyncio.create_task(manager._batch_loop())
-
-        with caplog.at_level(logging.ERROR):
-            await asyncio.sleep(0.03)
-
-        manager._running = False
-        task.cancel()
-        with contextlib.suppress(asyncio.CancelledError):
-            await task
+        with (
+            patch.object(manager, "_flush_pending_updates", side_effect=failing_flush),
+            caplog.at_level(logging.ERROR),
+        ):
+            task = asyncio.create_task(manager._batch_loop())
+            try:
+                await asyncio.wait_for(errored.wait(), timeout=5.0)
+            finally:
+                manager._running = False
+                task.cancel()
+                with contextlib.suppress(asyncio.CancelledError):
+                    await task
 
         # Errors should be logged
-        assert (
-            "Error in batch processing" in caplog.text
-            or len(manager._pending_updates) > 0
-        )
+        assert "Error in batch processing" in caplog.text
 
     @pytest.mark.asyncio
     async def test_cleanup_loop_exception_handling(self, manager, caplog):
@@ -274,25 +284,35 @@ class TestBackgroundLoopExceptions:
         manager._running = True
         manager.config.reservation_cleanup_interval = 0.01
 
+        # A second call proves the loop survived the first error. Signal the
+        # test deterministically instead of racing a fixed sleep.
+        call_count = 0
+        errored = asyncio.Event()
+
+        async def failing_cleanup():
+            nonlocal call_count
+            call_count += 1
+            if call_count >= 2:
+                errored.set()
+            raise Exception("Cleanup error")
+
         with (
             patch.object(
-                manager,
-                "_cleanup_expired_reservations",
-                side_effect=Exception("Cleanup error"),
+                manager, "_cleanup_expired_reservations", side_effect=failing_cleanup
             ),
             caplog.at_level(logging.ERROR),
         ):
             task = asyncio.create_task(manager._cleanup_loop())
-            await asyncio.sleep(0.03)
-            manager._running = False
-            task.cancel()
-            with contextlib.suppress(asyncio.CancelledError):
-                await task
+            try:
+                await asyncio.wait_for(errored.wait(), timeout=5.0)
+            finally:
+                manager._running = False
+                task.cancel()
+                with contextlib.suppress(asyncio.CancelledError):
+                    await task
 
         # Error should be logged
-        assert (
-            any("Error in cleanup loop" in msg for msg in caplog.messages) or True
-        )  # May not hit in time
+        assert any("Error in cleanup loop" in msg for msg in caplog.messages)
 
 
 class TestFlushPendingUpdates:

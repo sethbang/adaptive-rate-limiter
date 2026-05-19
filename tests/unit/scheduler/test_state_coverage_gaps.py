@@ -30,6 +30,25 @@ from adaptive_rate_limiter.scheduler.state import (
 )
 
 
+def _failing_side_effect(exc: BaseException):
+    """Build an async side_effect that always raises ``exc`` and an Event.
+
+    The Event is set on the second invocation, which proves the surrounding
+    loop survived the first exception and logged it. Tests await the Event
+    instead of racing a fixed sleep against a coarse (Windows ~16ms) timer.
+    """
+    state = {"calls": 0}
+    survived = asyncio.Event()
+
+    async def side_effect(*args, **kwargs):
+        state["calls"] += 1
+        if state["calls"] >= 2:
+            survived.set()
+        raise exc
+
+    return side_effect, survived
+
+
 @pytest.fixture
 def mock_backend():
     """Create a mock backend."""
@@ -505,20 +524,21 @@ class TestBatchLoopErrorCoverage:
 
         # Mock _flush_pending_updates to raise AttributeError
         # This tests the exception handler in _batch_loop lines 1751-1752
+        side_effect, survived = _failing_side_effect(
+            AttributeError("Missing attribute")
+        )
         with (
-            patch.object(
-                manager,
-                "_flush_pending_updates",
-                side_effect=AttributeError("Missing attribute"),
-            ),
+            patch.object(manager, "_flush_pending_updates", side_effect=side_effect),
             caplog.at_level(logging.ERROR),
         ):
             task = asyncio.create_task(manager._batch_loop())
-            await asyncio.sleep(0.05)
-            manager._running = False
-            task.cancel()
-            with contextlib.suppress(asyncio.CancelledError):
-                await task
+            try:
+                await asyncio.wait_for(survived.wait(), timeout=5.0)
+            finally:
+                manager._running = False
+                task.cancel()
+                with contextlib.suppress(asyncio.CancelledError):
+                    await task
 
         # Error should be logged
         assert "Error in batch processing" in caplog.text
@@ -538,20 +558,19 @@ class TestBatchLoopErrorCoverage:
         manager._pending_updates = [PendingUpdate(entry=entry, retry_count=0)]
 
         # Mock _flush_pending_updates to raise ValueError
+        side_effect, survived = _failing_side_effect(ValueError("Invalid value"))
         with (
-            patch.object(
-                manager,
-                "_flush_pending_updates",
-                side_effect=ValueError("Invalid value"),
-            ),
+            patch.object(manager, "_flush_pending_updates", side_effect=side_effect),
             caplog.at_level(logging.ERROR),
         ):
             task = asyncio.create_task(manager._batch_loop())
-            await asyncio.sleep(0.05)
-            manager._running = False
-            task.cancel()
-            with contextlib.suppress(asyncio.CancelledError):
-                await task
+            try:
+                await asyncio.wait_for(survived.wait(), timeout=5.0)
+            finally:
+                manager._running = False
+                task.cancel()
+                with contextlib.suppress(asyncio.CancelledError):
+                    await task
 
         # Error should be logged
         assert "Error in batch processing" in caplog.text
@@ -571,20 +590,19 @@ class TestBatchLoopErrorCoverage:
         manager._pending_updates = [PendingUpdate(entry=entry, retry_count=0)]
 
         # Mock _flush_pending_updates to raise OSError
+        side_effect, survived = _failing_side_effect(OSError("Network error"))
         with (
-            patch.object(
-                manager,
-                "_flush_pending_updates",
-                side_effect=OSError("Network error"),
-            ),
+            patch.object(manager, "_flush_pending_updates", side_effect=side_effect),
             caplog.at_level(logging.ERROR),
         ):
             task = asyncio.create_task(manager._batch_loop())
-            await asyncio.sleep(0.05)
-            manager._running = False
-            task.cancel()
-            with contextlib.suppress(asyncio.CancelledError):
-                await task
+            try:
+                await asyncio.wait_for(survived.wait(), timeout=5.0)
+            finally:
+                manager._running = False
+                task.cancel()
+                with contextlib.suppress(asyncio.CancelledError):
+                    await task
 
         # Error should be logged
         assert "Error in batch processing" in caplog.text
@@ -604,20 +622,21 @@ class TestCleanupLoopErrorCoverage:
         manager._running = True
 
         # Make cleanup raise exception
+        side_effect, survived = _failing_side_effect(Exception("Cleanup failed"))
         with (
             patch.object(
-                manager,
-                "_cleanup_expired_reservations",
-                side_effect=Exception("Cleanup failed"),
+                manager, "_cleanup_expired_reservations", side_effect=side_effect
             ),
             caplog.at_level(logging.ERROR),
         ):
             task = asyncio.create_task(manager._cleanup_loop())
-            await asyncio.sleep(0.05)
-            manager._running = False
-            task.cancel()
-            with contextlib.suppress(asyncio.CancelledError):
-                await task
+            try:
+                await asyncio.wait_for(survived.wait(), timeout=5.0)
+            finally:
+                manager._running = False
+                task.cancel()
+                with contextlib.suppress(asyncio.CancelledError):
+                    await task
 
         # Error should be logged
         assert "Error in cleanup loop" in caplog.text
@@ -633,20 +652,21 @@ class TestCleanupLoopErrorCoverage:
         manager._running = True
 
         # Make account cleanup raise exception
+        side_effect, survived = _failing_side_effect(
+            RuntimeError("Account cleanup failed")
+        )
         with (
-            patch.object(
-                manager,
-                "_cleanup_account_states",
-                side_effect=RuntimeError("Account cleanup failed"),
-            ),
+            patch.object(manager, "_cleanup_account_states", side_effect=side_effect),
             caplog.at_level(logging.ERROR),
         ):
             task = asyncio.create_task(manager._cleanup_loop())
-            await asyncio.sleep(0.05)
-            manager._running = False
-            task.cancel()
-            with contextlib.suppress(asyncio.CancelledError):
-                await task
+            try:
+                await asyncio.wait_for(survived.wait(), timeout=5.0)
+            finally:
+                manager._running = False
+                task.cancel()
+                with contextlib.suppress(asyncio.CancelledError):
+                    await task
 
         # Error should be logged
         assert "Error in cleanup loop" in caplog.text

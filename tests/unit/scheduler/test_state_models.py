@@ -10,12 +10,31 @@ This module covers:
 
 import time
 from datetime import datetime, timedelta, timezone
+from unittest.mock import patch
 
 from adaptive_rate_limiter.scheduler.state import (
     RateLimitState,
     StateEntry,
     StateType,
 )
+
+
+def _freeze_models_now(frozen: datetime):
+    """Freeze datetime.now() inside the state models module.
+
+    time_until_reset reads datetime.now(timezone.utc) internally; freezing it
+    makes the elapsed-time math exact instead of racing wall-clock drift
+    between state construction and the property access.
+    """
+
+    class _FrozenDatetime(datetime):
+        @classmethod
+        def now(cls, tz=None):  # type: ignore[override]
+            return frozen
+
+    return patch(
+        "adaptive_rate_limiter.scheduler.state.models.datetime", _FrozenDatetime
+    )
 
 
 class TestStateEntryProperties:
@@ -323,7 +342,9 @@ class TestRateLimitStateTimeUntilReset:
 
         state = RateLimitState(model_id="test", reset_at=future, reset_at_daily=past)
 
-        assert 29.0 < state.time_until_reset < 31.0
+        # Freeze the clock so the elapsed-time math is exact.
+        with _freeze_models_now(now):
+            assert state.time_until_reset == 30.0
 
     def test_time_until_reset_only_daily_in_future(self):
         """Test time_until_reset with only daily reset in future."""
@@ -333,7 +354,9 @@ class TestRateLimitStateTimeUntilReset:
 
         state = RateLimitState(model_id="test", reset_at=past, reset_at_daily=future)
 
-        assert 59.0 < state.time_until_reset < 61.0
+        # Freeze the clock so the elapsed-time math is exact.
+        with _freeze_models_now(now):
+            assert state.time_until_reset == 60.0
 
     def test_time_until_reset_takes_minimum(self):
         """Test time_until_reset returns minimum of future resets."""
@@ -345,8 +368,10 @@ class TestRateLimitStateTimeUntilReset:
             model_id="test", reset_at=near_future, reset_at_daily=far_future
         )
 
-        # Should return the nearer reset (10 seconds)
-        assert 9.0 < state.time_until_reset < 11.0
+        # Should return the nearer reset (10 seconds); freeze the clock so
+        # the elapsed-time math is exact.
+        with _freeze_models_now(now):
+            assert state.time_until_reset == 10.0
 
 
 class TestRateLimitStateIsExhausted:

@@ -493,10 +493,11 @@ class TestCleanupLoopBranches:
 
         with patch.object(cache, "_cleanup_expired", tracked_cleanup):
             task = asyncio.create_task(cache._cleanup_loop())
-            await asyncio.sleep(0.05)
 
+            # tracked_cleanup stops the loop after the first run, so awaiting
+            # the task is a deterministic gate (no fixed sleep race).
             try:
-                await asyncio.wait_for(task, timeout=0.5)
+                await asyncio.wait_for(task, timeout=5.0)
             except asyncio.TimeoutError:
                 task.cancel()
                 with contextlib.suppress(asyncio.CancelledError):
@@ -513,22 +514,24 @@ class TestCleanupLoopBranches:
         cache._running = True
         cache._task_cancelled = False
 
-        async def set_cancelled():
-            await asyncio.sleep(0.02)
+        # Set the cancelled flag from inside a cleanup iteration so the loop
+        # deterministically observes it on its next check, instead of racing
+        # a fixed sleep in a side task against the loop.
+        async def set_cancelled_during_cleanup():
             cache._task_cancelled = True
 
-        _ = asyncio.create_task(set_cancelled())  # noqa: RUF006
+        with patch.object(cache, "_cleanup_expired", set_cancelled_during_cleanup):
+            task = asyncio.create_task(cache._cleanup_loop())
 
-        task = asyncio.create_task(cache._cleanup_loop())
-
-        try:
-            await asyncio.wait_for(task, timeout=0.5)
-        except asyncio.TimeoutError:
-            task.cancel()
-            with contextlib.suppress(asyncio.CancelledError):
-                await task
+            try:
+                await asyncio.wait_for(task, timeout=5.0)
+            except asyncio.TimeoutError:
+                task.cancel()
+                with contextlib.suppress(asyncio.CancelledError):
+                    await task
 
         # Loop should have exited
+        assert cache._task_cancelled is True
 
     @pytest.mark.asyncio
     async def test_cleanup_loop_cancelled_error_reraise(self, caplog):
@@ -567,24 +570,29 @@ class TestCleanupLoopBranches:
 
         # Create loop that will raise a non-CancelledError exception
         call_count = [0]
+        errored = asyncio.Event()
 
         async def failing_cleanup():
             call_count[0] += 1
             if call_count[0] == 1:
                 # First call raises fatal exception
                 raise RuntimeError("Fatal error in cleanup")
+            # A second call proves the loop survived. Signal the test
+            # deterministically instead of racing a fixed sleep.
+            errored.set()
 
         with (
             patch.object(cache, "_cleanup_expired", failing_cleanup),
             caplog.at_level(logging.ERROR),
         ):
             task = asyncio.create_task(cache._cleanup_loop())
-            await asyncio.sleep(0.05)
-
-            cache._running = False
-            task.cancel()
-            with contextlib.suppress(asyncio.CancelledError):
-                await task
+            try:
+                await asyncio.wait_for(errored.wait(), timeout=5.0)
+            finally:
+                cache._running = False
+                task.cancel()
+                with contextlib.suppress(asyncio.CancelledError):
+                    await task
 
         # Should have logged the error
         assert "Error during cache cleanup" in caplog.text

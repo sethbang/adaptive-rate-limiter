@@ -606,13 +606,30 @@ class TestIntelligentModeStrategyQueueLockSafety:
         queue_key = await strategy._get_queue_key(metadata)
         await strategy._create_fast_queue(queue_key, metadata)
 
+        # Drive submit_request deterministically up to the queue lock instead
+        # of racing a fixed sleep. _get_queue_key is submit_request's only
+        # await before the `async with self._queue_locks[...]`; signalling
+        # after it returns lets us know one yield away from the lock acquire.
+        real_get_queue_key = strategy._get_queue_key
+        reached_lock = asyncio.Event()
+
+        async def signalling_get_queue_key(*args, **kwargs):
+            result = await real_get_queue_key(*args, **kwargs)
+            reached_lock.set()
+            return result
+
         # Hold the queue lock, as the scheduler loop does while draining.
         async with strategy._queue_locks[queue_key]:
-            submit_task = asyncio.create_task(
-                strategy.submit_request(metadata, AsyncMock(return_value="ok"))
-            )
-            # Give submit_request ample time to run; it must block on the lock.
-            await asyncio.sleep(0.05)
+            with patch.object(
+                strategy, "_get_queue_key", side_effect=signalling_get_queue_key
+            ):
+                submit_task = asyncio.create_task(
+                    strategy.submit_request(metadata, AsyncMock(return_value="ok"))
+                )
+                # Wait until submit_request has resolved _get_queue_key, then
+                # yield once so it runs into `async with` and blocks there.
+                await asyncio.wait_for(reached_lock.wait(), timeout=5.0)
+                await asyncio.sleep(0)
 
             assert len(strategy.fast_queues[queue_key]) == 0
             assert not submit_task.done()
