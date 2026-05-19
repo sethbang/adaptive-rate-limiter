@@ -46,10 +46,21 @@ except ImportError:
     lupa = None
 
 
-# Skip all tests if dependencies not available
+import os as _os
+
+_using_real_redis = bool(_os.environ.get("REDIS_URL"))
+
+# Skip all tests if the fakeredis/lupa dependencies are missing AND no real
+# Redis is available via REDIS_URL.
 pytestmark = [
-    pytest.mark.skipif(fakeredis is None, reason="fakeredis not installed"),
-    pytest.mark.skipif(lupa is None, reason="lupa not installed (required for Lua)"),
+    pytest.mark.skipif(
+        not _using_real_redis and fakeredis is None,
+        reason="fakeredis not installed (and REDIS_URL not set)",
+    ),
+    pytest.mark.skipif(
+        not _using_real_redis and lupa is None,
+        reason="lupa not installed (required for Lua in fakeredis; and REDIS_URL not set)",
+    ),
 ]
 
 
@@ -68,15 +79,6 @@ for script_name in [
     script_path = LUA_DIR / f"{script_name}.lua"
     if script_path.exists():
         LUA_SCRIPTS[script_name] = script_path.read_text()
-
-
-@pytest.fixture
-async def redis():
-    """Create a fresh fakeredis instance for each test."""
-    assert fakeredis is not None, "fakeredis not available"
-    r = fakeredis.FakeRedis()
-    yield r
-    await r.aclose()
 
 
 @pytest.fixture

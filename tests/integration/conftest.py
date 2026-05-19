@@ -515,3 +515,32 @@ async def failover_cluster_backend():
 
     # Cleanup
     await backend.cleanup()
+
+
+@pytest.fixture
+async def redis():
+    """Create a Redis client for each test.
+
+    When ``REDIS_URL`` is set in the environment, connects to that real Redis
+    instance and flushes the database before and after the test for isolation.
+    Otherwise falls back to a ``fakeredis`` in-memory instance.
+    """
+    redis_url = os.environ.get("REDIS_URL")
+
+    if redis_url:
+        import redis.asyncio as aioredis
+
+        r = aioredis.Redis.from_url(redis_url, decode_responses=False)
+        await r.flushdb()
+        yield r
+        await r.flushdb()
+        await r.aclose()
+    else:
+        try:
+            import fakeredis.aioredis as fakeredis_aioredis
+        except ImportError:
+            pytest.skip("fakeredis not installed")
+
+        r = fakeredis_aioredis.FakeRedis()
+        yield r
+        await r.aclose()
