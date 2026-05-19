@@ -104,7 +104,7 @@ class FallbackRateLimiter:
     - Lock-free jitter: Sleep happens OUTSIDE any locks
     - Per-request delay: Every request is rate-limited, not just the first
     - Exponential backoff on 429s: Backs off aggressively to prevent cascade
-    - AIMD (Additive Increase, Multiplicative Decrease) for recovery
+    - AIMD (Multiplicative Increase on 429, Additive Decrease on success) for recovery
     """
 
     def __init__(self, config: dict[str, Any]):
@@ -232,7 +232,7 @@ class RedisBackend(BaseBackend):
     - Atomic Lua scripts for all operations
 
     Deployment Requirements:
-    - Redis 2.6+ (for Lua bit library)
+    - Redis 2.6+ (for EVALSHA / Lua scripting support)
     - Redis Cluster mode recommended for production multi-key atomicity
     """
 

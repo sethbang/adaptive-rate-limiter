@@ -283,9 +283,11 @@ class MemoryBackend(BaseBackend):
         """
         Atomically check and reserve capacity.
 
-        This is a simplified implementation that doesn't enforce strict limits
-        but tracks reservations for testing purposes. It implements the same
-        safety_margin logic as Redis backend for test parity.
+        Enforces capacity limits via a token-bucket model: refills capacity based
+        on elapsed time since last update, then checks whether the effective
+        remaining capacity (after applying safety_margin) can satisfy the request.
+        Returns (False, None) when capacity is insufficient. Implements the same
+        safety_margin logic as the Redis backend for test parity.
 
         Args:
             key: The key/model to check capacity for
@@ -293,7 +295,8 @@ class MemoryBackend(BaseBackend):
             tokens: Number of tokens to reserve
             bucket_limits: Optional dictionary containing rpm_limit and tpm_limit
             safety_margin: Safety margin multiplier (0.0-1.0) applied to capacity checks.
-                          For memory backend, this is validated but not strictly enforced.
+                          Converted to a time-based buffer (seconds of capacity) that is
+                          subtracted from effective remaining capacity before the check.
             request_id: Optional request ID for drift correction tracking
         """
         # Validate safety_margin

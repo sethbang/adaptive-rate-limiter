@@ -16,7 +16,7 @@ class RateLimiterError(Exception):
 
     Example:
         try:
-            await scheduler.execute(request)
+            result = await scheduler.submit_request(metadata, request_func)
         except RateLimiterError as e:
             logger.error(f"Rate limiter error: {e}")
     """
@@ -40,7 +40,7 @@ class CapacityExceededError(RateLimiterError):
 
     Example:
         try:
-            await scheduler.execute(request)
+            result = await scheduler.submit_request(metadata, request_func)
         except CapacityExceededError as e:
             if e.retry_after is not None:
                 await asyncio.sleep(e.retry_after)
@@ -74,10 +74,9 @@ class BucketNotFoundError(RateLimiterError):
 
     Example:
         try:
-            bucket = await backend.get_bucket("api-calls")
+            result = await scheduler.submit_request(metadata, request_func)
         except BucketNotFoundError as e:
-            logger.warning(f"Bucket '{e.bucket_id}' not found, creating...")
-            await backend.create_bucket(e.bucket_id, default_config)
+            logger.warning(f"Bucket '{e.bucket_id}' not found, skipping request")
     """
 
     def __init__(self, bucket_id: str):
@@ -99,8 +98,7 @@ class ReservationCapacityError(RateLimiterError):
 
     Example:
         try:
-            async with tracker.reserve(request_id, capacity=1):
-                await process_request()
+            result = await scheduler.submit_request(metadata, request_func)
         except ReservationCapacityError:
             # Shed load or queue the request externally
             await external_queue.push(request)
@@ -119,7 +117,7 @@ class BackendConnectionError(RateLimiterError):
 
     Example:
         try:
-            backend = await RedisBackend.connect(redis_url)
+            backend = RedisBackend(redis_url=redis_url)
         except BackendConnectionError:
             logger.warning("Redis unavailable, falling back to memory backend")
             backend = MemoryBackend()
@@ -162,7 +160,7 @@ class ConfigurationError(RateLimiterError):
 
     Example:
         try:
-            scheduler = AdaptiveScheduler(config)
+            scheduler = create_scheduler(client=my_client, config=config)
         except ConfigurationError as e:
             logger.error(f"Invalid configuration: {e}")
             raise SystemExit(1)
@@ -184,7 +182,7 @@ class QueueOverflowError(RateLimiterError):
 
     Example:
         try:
-            await scheduler.schedule(request)
+            result = await scheduler.submit_request(metadata, request_func)
         except QueueOverflowError as e:
             if e.queue_key:
                 logger.warning(f"Queue '{e.queue_key}' is full")
@@ -211,7 +209,7 @@ class TooManyFailedRequestsError(RateLimiterError):
 
     Example:
         try:
-            await scheduler.execute(request)
+            result = await scheduler.submit_request(metadata, request_func)
         except TooManyFailedRequestsError as e:
             logger.error(
                 f"Circuit breaker tripped: {e.failure_count} failures "
