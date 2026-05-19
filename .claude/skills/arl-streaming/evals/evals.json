@@ -18,8 +18,8 @@
       "expected_output": "Recommends entering the iterator as an async context manager so cleanup runs on early break.",
       "files": [],
       "expectations": [
-        "Recommends using async with on the RateLimitedAsyncIterator",
-        "Explains that __aexit__ / aclose() releases the reservation on early break"
+        "Recommends explicitly calling await stream.aclose() when breaking out of the loop early, for example in a try/finally block",
+        "Explains that the iterator does not auto-release on early break and aclose() runs the refund-based release"
       ]
     },
     {

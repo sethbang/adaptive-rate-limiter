@@ -43,18 +43,28 @@ async for chunk in stream:
 The wrapper is transparent — it yields exactly the chunks the inner iterator
 yields. The accounting is a side effect.
 
-## Early break needs the context manager
+## Early break needs explicit cleanup
 
-A plain `async for ... break` leaves the inner stream open and the reservation
-unreleased. To break early, enter the iterator as an async context manager —
-`__aexit__` calls `aclose()`, which runs the refund:
+`RateLimitedAsyncIterator` releases its reservation automatically when the
+`async for` loop runs to completion, and on the error path if the stream
+raises. But a plain `async for ... break` stops early without triggering
+either path — the reservation is left unreleased and capacity leaks.
+
+The iterator is **not** an async context manager. To clean up on early break,
+call `aclose()` yourself, in a `try`/`finally` so it runs on every exit path:
 
 ```python
-async with stream:
+stream = RateLimitedAsyncIterator(raw_iterator, ctx)
+try:
     async for chunk in stream:
         if done:
-            break   # __aexit__ -> aclose() -> reservation released
+            break
+finally:
+    await stream.aclose()   # releases the reservation (refund-based)
 ```
+
+`aclose()` is the public cleanup method; it runs the refund-based release and
+is safe to call even after the stream has finished normally.
 
 ## Keep reservation and refund consistent
 
