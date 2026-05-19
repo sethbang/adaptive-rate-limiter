@@ -9,6 +9,61 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 _No unreleased changes._
 
+## [1.1.0] - 2026-05-19
+
+This release resolves a full code audit of v1.0.2 — concurrency, lifecycle,
+packaging, and API-boundary issues — and removes a class of intermittent CI
+failures caused by un-awaited coroutines in the test suite.
+
+### Added
+
+- **Public API**: `ScheduleResult` and `QueuedRequest` are now exported from
+  the top-level `adaptive_rate_limiter` package and from
+  `adaptive_rate_limiter.scheduler`. They are the return type of
+  `submit_request` in `INTELLIGENT` and `ACCOUNT` modes.
+- **Config**: `RateLimiterConfig` gained `max_retries`, `batch_size`,
+  `stale_entry_ttl`, and `max_tracking_entries` fields, each validated in
+  `__post_init__`.
+- **CI**: a packaging job builds the wheel and verifies all six bundled Lua
+  scripts ship with it, guarding against a regression that would break the
+  `[redis]` install.
+
+### Changed
+
+- **ACCOUNT mode**: the concurrency limit is now read from the correct
+  config field, `max_concurrent_executions`. Previously the strategy looked
+  up a non-existent `max_concurrent_requests` attribute and silently fell
+  back to the hardcoded default of 10.
+- **Reservations & streaming**: staleness and abandonment detection now use
+  a monotonic clock (`time.monotonic()`), making it immune to wall-clock and
+  NTP adjustments. The effective stale-reservation age is derived from
+  `request_timeout`, so cleanup can no longer reclaim a still-running
+  reservation.
+- Removed the empty, unused `_internal/` package. `_`-prefixed names were
+  never part of the public API, so this is not a breaking change.
+
+### Fixed
+
+- **Scheduler loop**: the INTELLIGENT mode loop no longer terminates
+  permanently when an unexpected exception is raised inside it.
+- **Queue race**: request enqueue and the `_queue_has_items` flag are now
+  mutated under the per-queue lock, preventing a lost update that could
+  leave a non-empty queue unscheduled.
+- **Reset watcher**: no longer raises `RuntimeError: Set changed size during
+  iteration` when a watcher fires during reset-time calculation.
+- **Shutdown**: `stop()` now cancels and awaits in-flight execution tasks
+  (INTELLIGENT and ACCOUNT modes) before the backend shuts down, so
+  capacity-release cleanup completes and request coroutines are not left
+  un-awaited.
+- **Cancellation orphan**: a reservation orphaned by cancellation between
+  capacity reservation and executor hand-off is now released immediately
+  instead of being held until stale cleanup.
+- **MemoryBackend**: streaming token refunds are reconciled against header
+  syncs via a per-key state version, preventing capacity over-admission when
+  a server header update superseded a reservation.
+- **Streaming**: on a successful wrap, reservation ownership is handed to the
+  iterator so stale-reservation cleanup cannot reclaim a live stream.
+
 ## [1.0.2] - 2026-04-25
 
 ### Fixed
@@ -138,7 +193,8 @@ Initial public release of Adaptive Rate Limiter.
   - `[full]`: All optional dependencies
 - **License**: Apache-2.0
 
-[Unreleased]: https://github.com/sethbang/adaptive-rate-limiter/compare/v1.0.2...HEAD
+[Unreleased]: https://github.com/sethbang/adaptive-rate-limiter/compare/v1.1.0...HEAD
+[1.1.0]: https://github.com/sethbang/adaptive-rate-limiter/compare/v1.0.2...v1.1.0
 [1.0.2]: https://github.com/sethbang/adaptive-rate-limiter/compare/v1.0.1...v1.0.2
 [1.0.1]: https://github.com/sethbang/adaptive-rate-limiter/compare/v1.0.0...v1.0.1
 [1.0.0]: https://github.com/sethbang/adaptive-rate-limiter/releases/tag/v1.0.0
