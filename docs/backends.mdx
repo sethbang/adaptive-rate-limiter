@@ -194,9 +194,29 @@ The following environment variables can be used for Redis configuration:
 
 These environment variables provide a convenient way to configure Redis connections without hardcoding URLs in your application code, especially useful for container deployments and CI/CD pipelines.
 
+### Lifecycle Management
+
+`RedisBackend` has explicit `start()` and `stop()` methods. When used through `StateManager` or `create_scheduler` (the normal path), the scheduler calls them automatically. If you construct a `RedisBackend` directly outside a scheduler, call them yourself:
+
+```python
+from adaptive_rate_limiter.backends import RedisBackend
+
+backend = RedisBackend(redis_url="redis://localhost:6379", account_id="default")
+
+# start() connects to Redis AND begins background orphan recovery
+await backend.start()
+
+try:
+    # ... use backend for rate limiting ...
+    pass
+finally:
+    # stop() halts orphan recovery and cleans up connections
+    await backend.stop()
+```
+
 ### Context Manager Pattern (Recommended)
 
-The `RedisBackend` supports async context manager for automatic connection and cleanup:
+The `async with` pattern is the recommended alternative: it calls `start()` on entry and `stop()` on exit, including on exceptions.
 
 ```python
 from adaptive_rate_limiter.backends import RedisBackend
@@ -210,7 +230,7 @@ async with backend as rb:
     # Auto-connects and starts orphan recovery
     # ... use backend for rate limiting ...
     pass
-# Auto-cleanup on exit
+# Auto-cleanup on exit (even if an exception was raised)
 ```
 
 ### Fallback Mode
@@ -244,7 +264,7 @@ The [`RedisBackend`](https://github.com/sethbang/adaptive-rate-limiter/blob/main
 | Script | Purpose |
 |--------|---------|
 | [`distributed_check_and_reserve`](https://github.com/sethbang/adaptive-rate-limiter/blob/main/src/adaptive_rate_limiter/backends/lua/distributed_check_and_reserve.lua) | Atomic capacity check and reservation |
-| [`distributed_update_rate_limits`](https://github.com/sethbang/adaptive-rate-limiter/blob/main/src/adaptive_rate_limiter/backends/lua/distributed_update_rate_limits.lua) | Sync state from 2xx response headers |
+| [`distributed_update_rate_limits`](https://github.com/sethbang/adaptive-rate-limiter/blob/main/src/adaptive_rate_limiter/backends/lua/distributed_update_rate_limits.lua) | Sync state from 2xx response headers. Accepts server-reported limit values verbatim — if the server reports a lower limit than stored (e.g. a tier downgrade), the local limit updates immediately. |
 | [`distributed_update_rate_limits_429`](https://github.com/sethbang/adaptive-rate-limiter/blob/main/src/adaptive_rate_limiter/backends/lua/distributed_update_rate_limits_429.lua) | Handle 429 (rate limited) responses |
 | [`distributed_release_capacity`](https://github.com/sethbang/adaptive-rate-limiter/blob/main/src/adaptive_rate_limiter/backends/lua/distributed_release_capacity.lua) | Release pending gauge reservations |
 | [`distributed_recover_orphan`](https://github.com/sethbang/adaptive-rate-limiter/blob/main/src/adaptive_rate_limiter/backends/lua/distributed_recover_orphan.lua) | Recover reservations from crashed requests |

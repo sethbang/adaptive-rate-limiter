@@ -67,6 +67,23 @@ shape). Changing one side alone corrupts state. After such a change, run the
 `fakeredis` does not exercise true multi-key atomicity. See
 `docker-compose.redis-cluster.yml` for a local cluster.
 
+## Lifecycle: start() and stop()
+
+When a `RedisBackend` is used via `StateManager` or `create_scheduler` (the normal path), the scheduler calls `start()` and `stop()` automatically — `start()` connects to Redis and begins background orphan recovery; `stop()` halts it.
+
+If you construct and use a `RedisBackend` directly outside a scheduler, manage the lifecycle yourself:
+
+```python
+backend = RedisBackend(redis_url="redis://localhost:6379/0")
+await backend.start()   # connects + starts orphan recovery
+try:
+    ...
+finally:
+    await backend.stop()
+```
+
+Or use `async with backend:` — it calls `start()` on entry and `stop()` on exit, including on exceptions, and is the recommended pattern.
+
 ## Wiring it in
 
 A backend reaches the scheduler through the state manager, not directly. Keep
