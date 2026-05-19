@@ -653,7 +653,7 @@ class TestUpdateRateLimits:
 
         # Verify state was updated
         state = await redis.hgetall(state_key)
-        # Limit takes max of current vs header, so should increase
+        # Header is authoritative: the header value replaces the stored value
         lim_req_after = int(state[b"lim_req"])
         assert lim_req_after == 50, (
             f"Request limit should be upgraded to 50, got {lim_req_after}"
@@ -883,6 +883,72 @@ class TestUpdateRateLimits429:
 
         # Should still succeed (release pending) even with bad headers
         assert result == 1, "Should still release pending with bad headers"
+
+    @pytest.mark.asyncio
+    async def test_update_429_accepts_limit_decrease(self, redis, script_shas):
+        """Test that a 429 response with a lower header limit stores the lower value.
+
+        When a server tier is downgraded and signals this via a 429, the header
+        limit will be lower than the stored limit.  The 429 script got the same
+        authoritative-header change as the normal update script, so it must also
+        apply the decrease rather than silently ignoring it.
+        """
+        update_429_sha = script_shas["distributed_update_rate_limits_429"]
+        keys = get_keys(req_id="429-decrease-test")
+        state_key, pend_req_key, pend_tok_key, req_map_key = keys
+
+        # Seed state with a HIGH limit (simulating a previous tier)
+        now = int(time.time())
+        await redis.hset(
+            state_key,
+            mapping={
+                "v": "1",
+                "rem_req": "1000",
+                "rem_tok": "100000",
+                "lim_req": "1000",  # HIGH stored limit
+                "lim_tok": "100000",
+                "rst_req": str(now + 60),
+                "rst_tok": str(now + 60),
+                "gen_req": "0",
+                "gen_tok": "0",
+            },
+        )
+        # Seed pending gauges at 0
+        await redis.set(pend_req_key, "0")
+        await redis.set(pend_tok_key, "0")
+        # Seed a request mapping so the script proceeds past the mapping check
+        # Format: gen_req:gen_tok:cost_req:cost_tok
+        await redis.set(req_map_key, "0:0:1:10")
+
+        # Run 429 update with a LOWER limit reported by the server (tier downgrade).
+        # head_rst_tok_delta=60 ensures calc_rst_tok = now+60 >= rst_tok(now+60)-10,
+        # so the token-window branch is entered and lim_tok is updated.
+        result = await redis.evalsha(
+            update_429_sha,
+            4,
+            *keys,
+            0,  # head_rem_req (429 means 0 remaining)
+            0,  # head_rem_tok
+            100,  # head_lim_req  <-- LOWER than stored 1000
+            10000,  # head_lim_tok  <-- LOWER than stored 100000
+            now + 60,  # head_rst_req (absolute unix ts)
+            60,  # head_rst_tok_delta: calc_rst_tok=now+60 passes staleness check
+            10,  # stale_buffer
+            120,  # max_tok_delta
+        )
+
+        assert result == 1, "Script should return 1 (success)"
+
+        state = await redis.hgetall(state_key)
+        stored_lim_req = int(state[b"lim_req"])
+        assert stored_lim_req == 100, (
+            f"Limit decrease must be applied: expected 100, got {stored_lim_req}. "
+            "math.max() keeps the old high value — header must be authoritative."
+        )
+        stored_lim_tok = int(state[b"lim_tok"])
+        assert stored_lim_tok == 10000, (
+            f"Token limit decrease must be applied: expected 10000, got {stored_lim_tok}."
+        )
 
 
 class TestRecoverOrphan:
