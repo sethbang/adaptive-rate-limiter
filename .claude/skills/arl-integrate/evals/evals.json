@@ -1,0 +1,39 @@
+{
+  "skill_name": "arl-integrate",
+  "evals": [
+    {
+      "id": 1,
+      "prompt": "I have an httpx-based client for an OpenAI-compatible chat API. Show me how to rate-limit my chat completion calls using the adaptive-rate-limiter library that's already a dependency in this project.",
+      "expected_output": "Code that implements ClientProtocol, builds a scheduler via create_scheduler, and submits a request through it.",
+      "files": [],
+      "expectations": [
+        "Defines a client class exposing base_url, timeout, and get_headers matching ClientProtocol",
+        "Builds the scheduler with create_scheduler() rather than instantiating Scheduler() directly",
+        "Enters the scheduler as an async context manager (async with scheduler)",
+        "Calls submit_request with a RequestMetadata object and an async request callable"
+      ]
+    },
+    {
+      "id": 2,
+      "prompt": "I'm using adaptive-rate-limiter for a small side project that just needs basic retry behavior, nothing fancy. Which scheduler mode should I pick and why?",
+      "expected_output": "Recommends basic mode and explains it is pass-through with retry needing no provider or classifier.",
+      "files": [],
+      "expectations": [
+        "Recommends the basic mode",
+        "Explains basic mode is pass-through with retry",
+        "Notes that basic mode does not require a provider or classifier"
+      ]
+    },
+    {
+      "id": 3,
+      "prompt": "I'm building a multi-tenant SaaS with adaptive-rate-limiter where each customer account has its own API quota. Set up the scheduler appropriately.",
+      "expected_output": "Recommends account mode and creates the scheduler with create_scheduler(mode=\"account\").",
+      "files": [],
+      "expectations": [
+        "Recommends the account mode for per-account quota tracking",
+        "Creates the scheduler via create_scheduler with mode set to account",
+        "Does not instantiate Scheduler directly"
+      ]
+    }
+  ]
+}
