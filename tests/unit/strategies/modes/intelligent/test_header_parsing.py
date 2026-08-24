@@ -1,4 +1,8 @@
+from unittest.mock import Mock
+
 import pytest
+
+from adaptive_rate_limiter.types.request import RequestMetadata
 
 
 class TestHeaderParsing:
@@ -20,9 +24,17 @@ class TestHeaderParsing:
         assert strategy._parse_duration_string("1m 30s") == 90.0
 
     @pytest.mark.asyncio
-    async def test_normalization_logic(self, strategy):
-        """Test that normalization logic works as expected."""
-        headers = {
+    async def test_normalization_logic(
+        self, strategy, mock_scheduler, mock_state_manager
+    ):
+        """Test that normalization logic works as expected.
+
+        Drives the real ``_update_rate_limit_state``. This test previously
+        re-implemented that method's normalization loop inline, which meant it
+        asserted nothing about production and would have stayed green through
+        any change to it.
+        """
+        mock_scheduler.extract_response_headers.return_value = {
             "x-ratelimit-remaining-requests": "99",
             "x-ratelimit-remaining-tokens": "9900",
             "x-ratelimit-limit-requests": "100",
@@ -31,16 +43,19 @@ class TestHeaderParsing:
             "x-ratelimit-reset-tokens": "500ms",
         }
 
-        # Simulate the logic in _update_rate_limit_state
-        for key in ["x-ratelimit-reset-requests", "x-ratelimit-reset-tokens"]:
-            if key in headers:
-                val = headers[key]
-                parsed = strategy._parse_duration_string(val)
-                if parsed is not None:
-                    headers[key] = str(parsed)
+        metadata = RequestMetadata(
+            request_id="req-normalization",
+            model_id="test-model",
+            resource_type="chat",
+        )
 
-        # Now assess should return full
-        status = strategy._assess_header_availability(headers)
-        assert status == "full"
+        await strategy._update_rate_limit_state(
+            metadata, result=Mock(), status_code=200
+        )
+
+        call = mock_state_manager.update_state_from_headers.call_args
+        headers = call.args[2] if len(call.args) > 2 else call.kwargs["headers"]
+
+        assert strategy._assess_header_availability(headers) == "full"
         assert headers["x-ratelimit-reset-requests"] == "2.0"
         assert headers["x-ratelimit-reset-tokens"] == "0.5"

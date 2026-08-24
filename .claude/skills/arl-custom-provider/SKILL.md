@@ -35,7 +35,13 @@ fails:
 
 ```python
 def _int(v: str | None) -> int | None:
-    return int(v) if v is not None else None
+    # Coerce through float(): some APIs render integral header values
+    # float-formatted ("499.0"), which a bare int() rejects. Return None
+    # rather than raising -- an unparseable header means "unknown".
+    try:
+        return int(float(v))  # type: ignore[arg-type]
+    except (TypeError, ValueError):
+        return None
 
 class MyProvider(ProviderInterface):
     @property
@@ -71,7 +77,14 @@ class MyProvider(ProviderInterface):
 
 ## Behavior contract
 
-- `parse_rate_limit_response` is the **only** place HTTP headers are parsed.
+- `parse_rate_limit_response` is **not called by the library** on the response
+  path. The scheduler calls only `discover_limits` and `get_bucket_for_model`;
+  response headers go to `Backend.update_rate_limits(headers=...)` and are
+  parsed by `BaseBackend._parse_rate_limit_headers`, which normalizes reset
+  values (epoch ms / epoch seconds / relative delta) to absolute Unix seconds.
+  Implement this method for your own use — inspection, logging, tests, or a
+  custom backend that calls it — but do not expect it to change what the
+  limiter ingests.
   Match header names case-insensitively. Leave unknown fields as `None` — never
   guess. Set `is_rate_limited=True` exactly when `status_code == 429`.
 - `discover_limits` should cache results unless `force_refresh=True`, and

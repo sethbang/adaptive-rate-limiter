@@ -293,7 +293,7 @@ class RedisBackend(BaseBackend):
         stale_buffer: int = 10,  # seconds
         orphan_recovery_interval: int = 30,  # seconds
         max_request_timeout: int = 300,  # 5 minutes
-        max_token_delta: int = 120,  # Maximum valid token reset delta (2x 60s window)
+        max_token_delta: int = 120,  # Largest adoptable token window (2x 60s)
         log_validation_failures: bool = True,  # Log when header validation fails
         cluster_mode: bool = False,  # Whether to use Redis Cluster client
         cluster_url: str
@@ -316,9 +316,18 @@ class RedisBackend(BaseBackend):
             stale_buffer: Buffer for stale window detection (10s)
             orphan_recovery_interval: How often to scan for orphans (30s)
             max_request_timeout: Max time before request is considered orphaned (5min)
-            max_token_delta: Maximum valid token reset delta in seconds (default 120).
-                The 120-second cap provides margin for clock skew (up to 30s),
-                network latency, and edge cases near window boundaries.
+            max_token_delta: Largest token-reset window, in seconds, that will be
+                adopted from response headers (default 120). The 120-second
+                default provides margin for clock skew (up to 30s), network
+                latency, and edge cases near window boundaries.
+
+                A longer observed window is NOT clamped into range: doing so
+                would tell the scheduler that token capacity refills earlier
+                than it really does, causing early window rotation and
+                over-sending. Instead the window is left unadopted (with a
+                one-time warning per model) while the observed token counts are
+                still applied. Raise this if your provider's token window is
+                genuinely longer than the default.
             log_validation_failures: Whether to log when header validation fails (default True)
             cluster_mode: Whether to use Redis Cluster client (default False)
             cluster_url: Redis Cluster connection URL. If not provided, falls back to
@@ -350,6 +359,9 @@ class RedisBackend(BaseBackend):
         self.orphan_recovery_interval = orphan_recovery_interval
         self.max_request_timeout = max_request_timeout
         self.max_token_delta = max_token_delta
+        # Models already warned about an out-of-range token reset window,
+        # so the diagnostic is logged once rather than every response.
+        self._warned_token_delta: set[str] = set()
         self.log_validation_failures = log_validation_failures
 
         # Base64 encode account_id for safe key construction
@@ -1189,6 +1201,56 @@ class RedisBackend(BaseBackend):
             # Unknown status: safe default is release only
             return "distributed_release_capacity"
 
+    def _token_reset_delta(self, tpm_reset: int | None, model: str = "") -> int:
+        """
+        Convert an absolute token-reset timestamp into the delta ARGV[6] expects.
+
+        ``BaseBackend._parse_rate_limit_headers`` normalizes both reset headers
+        to absolute Unix seconds, but the update Lua scripts take ARGV[6] as
+        *seconds until reset* and re-anchor it against Redis server time
+        (``calc_rst_tok = now + delta``). Deriving the delta here preserves that
+        clock-skew tolerance: the difference is measured on our clock, then
+        re-based onto Redis's, so the two clocks never have to agree.
+
+        The value is **not** clamped to ``max_token_delta``. Clamping a longer
+        window down would tell the script the token bucket refills earlier than
+        it really does; the script would adopt that as an observed window,
+        rotate early, and hand out a full fresh token budget the server has not
+        granted - over-sending, and earning the 429s this library exists to
+        avoid. Believing a window is longer than it is only over-throttles,
+        which is recoverable, so the out-of-range case is left for the script to
+        handle: it skips the window but still ingests the observed counts.
+
+        Args:
+            tpm_reset: Absolute Unix timestamp in seconds, or None if unknown
+            model: Model identifier, used only for the diagnostic log
+
+        Returns:
+            Seconds until the token window resets, floored at 0. Returns 0 when
+            the reset time is unknown, which the Lua guards reject cleanly
+            rather than acting on a guess.
+        """
+        if not tpm_reset:
+            return 0
+
+        delta = max(0, int(tpm_reset - time.time()))
+
+        if delta > self.max_token_delta and model not in self._warned_token_delta:
+            # Once per model: this fires on every response for a provider whose
+            # window genuinely exceeds the bound, and would otherwise be noise.
+            self._warned_token_delta.add(model)
+            logger.warning(
+                f"Token reset window for {model!r} is {delta}s, beyond the "
+                f"configured max_token_delta of {self.max_token_delta}s. The "
+                f"observed token counts will still be applied, but the reset "
+                f"window will not be adopted (it is not clamped, because an "
+                f"early reset would over-send). Raise max_token_delta on "
+                f"RedisBackend if this provider's token window is genuinely "
+                f"longer than {self.max_token_delta}s."
+            )
+
+        return delta
+
     async def _execute_update_with_tracking(
         self,
         redis_client: Any,
@@ -1333,8 +1395,10 @@ class RedisBackend(BaseBackend):
                     parsed.get("tpm_remaining", 0),
                     parsed.get("rpm_limit", self.DEFAULT_RPM_LIMIT),
                     parsed.get("tpm_limit", self.DEFAULT_TPM_LIMIT),
-                    parsed.get("rpm_reset", 0),  # Absolute timestamp
-                    parsed.get("tpm_reset", 0),  # Relative seconds (delta)
+                    # ARGV[5]: absolute Unix seconds, as the parser produces it
+                    parsed.get("rpm_reset", 0),
+                    # ARGV[6]: derived here, since the script wants a delta
+                    self._token_reset_delta(parsed.get("tpm_reset"), model),
                     self.stale_buffer,
                     self.max_token_delta,  # ARGV[8]: max valid token reset delta
                 ]

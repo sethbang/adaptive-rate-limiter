@@ -573,47 +573,29 @@ class BaseScheduler(ABC):
         Returns:
             Dict containing parsed rate limit information
         """
-        rate_limit_info = {}
+        rate_limit_info: dict[str, Any] = {}
 
-        # Parse remaining requests
-        remaining_requests = headers.get("x-ratelimit-remaining-requests")
-        if remaining_requests is not None:
+        # Table-driven so all four fields coerce identically. Values are taken
+        # through float() first: some APIs render integral header values
+        # float-formatted ("499.0"), which a bare int() rejects - the field
+        # would then be dropped with only a warning, leaving the caller a
+        # silently partial dict.
+        fields = (
+            ("remaining_requests", "x-ratelimit-remaining-requests"),
+            ("reset_requests", "x-ratelimit-reset-requests"),
+            ("remaining_tokens", "x-ratelimit-remaining-tokens"),
+            ("reset_tokens", "x-ratelimit-reset-tokens"),
+        )
+        for info_key, header in fields:
+            raw = headers.get(header)
+            if raw is None:
+                continue
             try:
-                rate_limit_info["remaining_requests"] = int(remaining_requests)
-            except (ValueError, TypeError):
-                logger.warning(
-                    f"Invalid x-ratelimit-remaining-requests header: {remaining_requests}"
-                )
-
-        # Parse request reset time
-        reset_requests = headers.get("x-ratelimit-reset-requests")
-        if reset_requests is not None:
-            try:
-                rate_limit_info["reset_requests"] = int(reset_requests)
-            except (ValueError, TypeError):
-                logger.warning(
-                    f"Invalid x-ratelimit-reset-requests header: {reset_requests}"
-                )
-
-        # Parse remaining tokens
-        remaining_tokens = headers.get("x-ratelimit-remaining-tokens")
-        if remaining_tokens is not None:
-            try:
-                rate_limit_info["remaining_tokens"] = int(remaining_tokens)
-            except (ValueError, TypeError):
-                logger.warning(
-                    f"Invalid x-ratelimit-remaining-tokens header: {remaining_tokens}"
-                )
-
-        # Parse token reset time
-        reset_tokens = headers.get("x-ratelimit-reset-tokens")
-        if reset_tokens is not None:
-            try:
-                rate_limit_info["reset_tokens"] = int(reset_tokens)
-            except (ValueError, TypeError):
-                logger.warning(
-                    f"Invalid x-ratelimit-reset-tokens header: {reset_tokens}"
-                )
+                # OverflowError: int(float("inf")). Without it a non-finite
+                # value would crash here rather than being dropped.
+                rate_limit_info[info_key] = int(float(raw))
+            except (ValueError, TypeError, OverflowError):
+                logger.warning(f"Invalid {header} header: {raw}")
 
         logger.debug(f"Parsed rate limit info: {rate_limit_info}")
         return rate_limit_info

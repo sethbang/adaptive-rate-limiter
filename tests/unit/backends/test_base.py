@@ -143,16 +143,20 @@ class TestBaseBackendConcreteMethods:
             "x-ratelimit-reset-tokens": "20",
             "retry-after": "5",
         }
+        now = time.time()
         result = backend._parse_rate_limit_headers(headers)
 
         assert result["rpm_limit"] == 100
         assert result["rpm_remaining"] == 50
-        assert result["rpm_reset"] == 10
         assert result["tpm_limit"] == 1000
         assert result["tpm_remaining"] == 500
-        assert result["tpm_reset"] == 20
         assert result["retry_after"] == 5
         assert "timestamp" in result
+
+        # Reset fields are normalized to absolute Unix seconds. These headers
+        # carry relative deltas ("10", "20"), so they resolve against now.
+        assert abs(result["rpm_reset"] - (now + 10)) < 1.5
+        assert abs(result["tpm_reset"] - (now + 20)) < 1.5
 
     def test_parse_reset_time_seconds_timestamp(self, backend):
         # Future timestamp in seconds
@@ -364,3 +368,141 @@ class TestHealthCheckResult:
         assert result.error == "Cluster node down"
         assert result.metadata is not None
         assert result.metadata["nodes_ok"] == 5
+
+
+class TestResetHeaderNormalization:
+    """Reset-header parsing: float-formatted values and the unit contract.
+
+    Regression coverage for the upstream report filed from the venice-py
+    integration (2026-08-23).
+
+    Note on provenance, since the original report had it backwards: Venice sends
+    a *clean integer* epoch in milliseconds. The ``"1787469826913.0"`` form was
+    manufactured inside this library by ``IntelligentModeStrategy``'s reset-header
+    normalization, which is fixed separately. The ``float()`` tolerance here is
+    genuine defence for providers that do render integral values
+    float-formatted -- it is not the fix for that self-inflicted corruption.
+
+    What was a real defect on its own terms is the unit handling: Venice's
+    epoch-milliseconds value parses fine under a bare ``int()`` and then lands a
+    reset window ~56,000 years out. ``_parse_rate_limit_headers`` declares reset
+    fields as **absolute Unix seconds**; these tests pin that contract.
+    """
+
+    @pytest.fixture
+    def backend(self):
+        return ConcreteBackend(namespace="test")  # type: ignore
+
+    def test_float_formatted_ms_reset_headers_are_not_dropped(self, backend):
+        """The exact repro from the report (float-formatted epoch ms)."""
+        headers = {
+            "x-ratelimit-limit-requests": "500",
+            "x-ratelimit-remaining-requests": "499",
+            "x-ratelimit-reset-requests": "1787469826913.0",
+            "x-ratelimit-reset-tokens": "1787469826914.0",
+        }
+        result = backend._parse_rate_limit_headers(headers)
+
+        assert "rpm_reset" in result
+        assert "tpm_reset" in result
+        # Normalized from epoch ms to absolute Unix seconds
+        assert result["rpm_reset"] == 1787469826
+        assert result["tpm_reset"] == 1787469826
+
+    def test_reset_headers_normalized_to_absolute_unix_seconds(self, backend):
+        """Epoch-ms, epoch-seconds and relative-delta all land on absolute seconds."""
+        now = time.time()
+
+        ms = backend._parse_rate_limit_headers(
+            {"x-ratelimit-reset-requests": str((now + 30) * 1000)}
+        )
+        assert abs(ms["rpm_reset"] - (now + 30)) < 1.5
+
+        secs = backend._parse_rate_limit_headers(
+            {"x-ratelimit-reset-requests": str(now + 30)}
+        )
+        assert abs(secs["rpm_reset"] - (now + 30)) < 1.5
+
+        delta = backend._parse_rate_limit_headers({"x-ratelimit-reset-requests": "30"})
+        assert abs(delta["rpm_reset"] - (now + 30)) < 1.5
+
+    def test_reset_values_are_ints(self, backend):
+        """Lua stores these in a hash that ``get_rate_limits`` reads back with int()."""
+        headers = {
+            "x-ratelimit-reset-requests": "1787469826913.0",
+            "x-ratelimit-reset-tokens": "1787469826914.0",
+        }
+        result = backend._parse_rate_limit_headers(headers)
+        assert isinstance(result["rpm_reset"], int)
+        assert isinstance(result["tpm_reset"], int)
+
+    def test_malformed_reset_headers_are_still_omitted(self, backend):
+        """Unparseable input must stay absent, never fabricate a 60s fallback.
+
+        Absence is load-bearing: the Lua guards reject a 0 cleanly, whereas a
+        fabricated timestamp would poison the monotonic ``rst_req`` window.
+        """
+        for bad in (
+            "abc",
+            "",
+            "not_a_number",
+            "NaN",
+            "inf",
+            "-inf",
+            "Infinity",
+            "1e400",
+        ):
+            result = backend._parse_rate_limit_headers(
+                {"x-ratelimit-reset-requests": bad, "x-ratelimit-reset-tokens": bad}
+            )
+            assert "rpm_reset" not in result, f"{bad!r} should be omitted"
+            assert "tpm_reset" not in result, f"{bad!r} should be omitted"
+
+    def test_absurd_but_finite_reset_values_are_rejected(self, backend):
+        """A finite-but-nonsensical value must not reach the state hash.
+
+        ``math.isfinite`` waves ``1e308`` through, and it clears the Lua
+        ``< 1600000000`` floor. Lua then stringifies it in scientific notation
+        (``"9.99e+304"``), which permanently breaks ``get_rate_limits``'s
+        ``int()`` read, and the monotonic ``math.max`` on the reset window means
+        every later real header fails the staleness comparison. The state
+        freezes until the key expires, so this needs a ceiling to match the
+        floor.
+        """
+        for bad in ("1e308", "1e30", "99999999999999999999"):
+            result = backend._parse_rate_limit_headers(
+                {"x-ratelimit-reset-requests": bad, "x-ratelimit-reset-tokens": bad}
+            )
+            assert "rpm_reset" not in result, f"{bad!r} should be rejected"
+            assert "tpm_reset" not in result, f"{bad!r} should be rejected"
+
+    def test_plausible_reset_values_still_accepted(self, backend):
+        """The ceiling must not reject legitimate windows."""
+        now = time.time()
+        for good in (now + 30, now + 86400, (now + 30) * 1000, 30):
+            result = backend._parse_rate_limit_headers(
+                {"x-ratelimit-reset-requests": str(good)}
+            )
+            assert "rpm_reset" in result, f"{good!r} should be accepted"
+
+    def test_float_formatted_count_headers_are_coerced(self, backend):
+        """Limit/remaining headers get the same tolerance as retry-after."""
+        headers = {
+            "x-ratelimit-limit-requests": "500.0",
+            "x-ratelimit-remaining-requests": "499.0",
+            "x-ratelimit-limit-tokens": "1000000.0",
+            "x-ratelimit-remaining-tokens": "999000.7",
+        }
+        result = backend._parse_rate_limit_headers(headers)
+        assert result["rpm_limit"] == 500
+        assert result["rpm_remaining"] == 499
+        assert result["tpm_limit"] == 1000000
+        assert result["tpm_remaining"] == 999000
+
+    def test_none_valued_header_does_not_raise(self, backend):
+        """A None value must be skipped, not raise TypeError out of the parser."""
+        result = backend._parse_rate_limit_headers(
+            {"x-ratelimit-reset-requests": None, "retry-after": None}  # type: ignore
+        )
+        assert "rpm_reset" not in result
+        assert "retry_after" not in result

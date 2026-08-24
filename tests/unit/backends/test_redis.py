@@ -3565,3 +3565,178 @@ class TestRedisBackendCoverageGaps:
         # The task completes and removes itself via the done-callback.
         await asyncio.sleep(0.05)
         assert len(backend._background_tasks) == 0
+
+
+class TestUpdateRateLimitsHeaderUnits:
+    """The Python -> Lua unit boundary for reset headers.
+
+    ``_parse_rate_limit_headers`` yields absolute Unix seconds for both reset
+    fields. ``distributed_update_rate_limits.lua`` wants ARGV[5] absolute but
+    ARGV[6] as a relative delta bounded by ``max_token_delta``; this class pins
+    the conversion that reconciles them.
+
+    Regression coverage for the venice-py upstream report (2026-08-23). Venice
+    sends a clean integer epoch in milliseconds; those values used to reach the
+    Lua guards in the wrong unit (and, via a separate self-inflicted rewrite,
+    sometimes float-formatted and dropped outright), so no update ever landed.
+    """
+
+    @pytest.fixture
+    def mock_redis(self):
+        mock = AsyncMock()
+        mock.script_load.return_value = "mock_sha"
+        mock.evalsha.return_value = 1
+        mock.ping.return_value = True
+        mock.nodes_manager.nodes_cache = {}
+        return mock
+
+    @pytest.fixture
+    def backend(self, mock_redis):
+        with patch(
+            "adaptive_rate_limiter.backends.redis.Redis.from_url",
+            return_value=mock_redis,
+        ):
+            backend = RedisBackend(
+                redis_url="redis://localhost:6379",
+                namespace="test",
+                account_id="test-account",
+            )
+            backend._redis = mock_redis
+            backend._connected = True
+            backend._script_shas = {
+                "distributed_update_rate_limits": "sha_update",
+                "distributed_update_rate_limits_429": "sha_update_429",
+                "distributed_release_capacity": "sha_release",
+            }
+            return backend
+
+    @staticmethod
+    def _argv(mock_redis):
+        """Extract ARGV as a 1-indexed dict from the evalsha call."""
+        call = mock_redis.evalsha.call_args.args
+        num_keys = call[1]
+        argv = call[2 + num_keys :]
+        return {i + 1: v for i, v in enumerate(argv)}
+
+    @staticmethod
+    def _venice_headers(reset_ms: float, tok_reset_ms: float):
+        """Venice sends reset headers as epoch milliseconds.
+
+        Rendered here via f-string on a float, which is what the library's own
+        (now fixed) normalization used to do to Venice's clean integer. Kept
+        float-formatted on purpose: it exercises both the unit conversion and
+        the parser's tolerance in one fixture.
+        """
+        return {
+            "x-ratelimit-limit-requests": "500",
+            "x-ratelimit-remaining-requests": "499",
+            "x-ratelimit-reset-requests": f"{reset_ms}",
+            "x-ratelimit-limit-tokens": "1000000",
+            "x-ratelimit-remaining-tokens": "999000",
+            "x-ratelimit-reset-tokens": f"{tok_reset_ms}",
+        }
+
+    @pytest.mark.asyncio
+    async def test_venice_ms_headers_satisfy_lua_guards(self, backend, mock_redis):
+        """Both reset ARGVs must survive the Lua validation block."""
+        now = time.time()
+        headers = self._venice_headers((now + 30) * 1000, (now + 45) * 1000)
+
+        backend._in_flight["req-1"] = InFlightRequest(
+            req_id="req-1",
+            cost_req=1,
+            cost_tok=10,
+            gen_req=1,
+            gen_tok=1,
+            start_time=now,
+            model="venice-uncensored",
+            account_id="acc",
+        )
+
+        result = await backend.update_rate_limits(
+            model="venice-uncensored",
+            headers=headers,
+            request_id="req-1",
+            status_code=200,
+        )
+        assert result == 1
+
+        argv = self._argv(mock_redis)
+
+        # ARGV[5]: absolute Unix seconds, must clear the `< 1600000000` guard
+        assert argv[5] >= 1600000000
+        assert abs(argv[5] - (now + 30)) < 2
+
+        # ARGV[6]: relative delta, in range so the script adopts the window
+        assert 0 <= argv[6] <= backend.max_token_delta
+        assert abs(argv[6] - 45) < 2
+
+    @pytest.mark.asyncio
+    async def test_long_token_delta_is_passed_through_not_clamped(
+        self, backend, mock_redis
+    ):
+        """A long token window reaches Lua as its true delta.
+
+        Clamping it to max_token_delta would tell the script the window resets
+        far earlier than it does; the script would then adopt that as an
+        observed window and refill token capacity early, causing over-send.
+        Lua decides what to do with an out-of-range delta -- it skips the
+        window while still taking the counts.
+        """
+        now = time.time()
+        headers = self._venice_headers((now + 30) * 1000, (now + 9999) * 1000)
+
+        await backend.update_rate_limits(
+            model="m", headers=headers, request_id="req-2", status_code=200
+        )
+
+        argv = self._argv(mock_redis)
+        assert argv[6] > backend.max_token_delta
+        assert abs(argv[6] - 9999) < 2
+
+    @pytest.mark.asyncio
+    async def test_past_token_reset_floors_at_zero(self, backend, mock_redis):
+        """An already-elapsed reset must floor at 0, not go negative."""
+        now = time.time()
+        headers = self._venice_headers((now + 30) * 1000, (now - 500) * 1000)
+
+        await backend.update_rate_limits(
+            model="m", headers=headers, request_id="req-3", status_code=200
+        )
+
+        argv = self._argv(mock_redis)
+        assert argv[6] == 0
+
+    @pytest.mark.asyncio
+    async def test_missing_reset_headers_still_send_zero(self, backend, mock_redis):
+        """Absent reset headers keep sending 0 so the Lua guards reject cleanly."""
+        headers = {
+            "x-ratelimit-limit-requests": "500",
+            "x-ratelimit-remaining-requests": "499",
+            "x-ratelimit-limit-tokens": "1000000",
+            "x-ratelimit-remaining-tokens": "999000",
+        }
+
+        await backend.update_rate_limits(
+            model="m", headers=headers, request_id="req-4", status_code=200
+        )
+
+        argv = self._argv(mock_redis)
+        assert argv[5] == 0
+        assert argv[6] == 0
+
+    @pytest.mark.asyncio
+    async def test_429_path_uses_same_conversion(self, backend, mock_redis):
+        """The 429 script shares the ARGV contract and the same caller."""
+        now = time.time()
+        headers = self._venice_headers((now + 30) * 1000, (now + 45) * 1000)
+
+        await backend.update_rate_limits(
+            model="m", headers=headers, request_id="req-5", status_code=429
+        )
+
+        assert mock_redis.evalsha.call_args.args[0] == "sha_update_429"
+        argv = self._argv(mock_redis)
+        assert argv[5] >= 1600000000
+        assert 0 <= argv[6] <= backend.max_token_delta
+        assert abs(argv[6] - 45) < 2

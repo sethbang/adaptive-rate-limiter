@@ -794,3 +794,59 @@ class TestBaseSchedulerCoverageExpansion:
 
         scheduler.state_manager.stop.assert_called_once()
         assert not scheduler.is_running()
+
+
+class TestHandleRateLimitHeadersCoercion:
+    """Float-formatted header values must not be silently dropped.
+
+    Regression coverage for the venice-py findings (2026-08-23). This is the
+    BASIC-mode consumer (reached via ``basic.py``'s success path), and it had the
+    same bare-``int()`` defect as the backend parser: the value is dropped and
+    only a warning is logged, so the caller sees a partial dict rather than an
+    error.
+    """
+
+    @pytest.fixture
+    def scheduler(self):
+        return ConcreteScheduler(
+            client=Mock(), config=RateLimiterConfig(mode=SchedulerMode.BASIC)
+        )
+
+    def test_float_formatted_values_are_coerced(self, scheduler):
+        headers = {
+            "x-ratelimit-remaining-requests": "499.0",
+            "x-ratelimit-reset-requests": "1767570180000.0",
+            "x-ratelimit-remaining-tokens": "999000.0",
+            "x-ratelimit-reset-tokens": "1767570180000.0",
+        }
+        info = scheduler.handle_rate_limit_headers(headers)
+
+        assert info["remaining_requests"] == 499
+        assert info["reset_requests"] == 1767570180000
+        assert info["remaining_tokens"] == 999000
+        assert info["reset_tokens"] == 1767570180000
+
+    def test_non_finite_values_do_not_raise(self, scheduler):
+        """int(float("inf")) raises OverflowError, which is not a ValueError.
+
+        The pre-coercion code raised ValueError here and caught it; coercing
+        through float() must not turn a dropped field into a crash.
+        """
+        headers = {
+            "x-ratelimit-remaining-requests": "inf",
+            "x-ratelimit-reset-requests": "nan",
+            "x-ratelimit-remaining-tokens": "-inf",
+            "x-ratelimit-reset-tokens": "Infinity",
+        }
+        info = scheduler.handle_rate_limit_headers(headers)
+        assert info == {}
+
+    def test_genuinely_invalid_values_are_still_dropped(self, scheduler):
+        headers = {
+            "x-ratelimit-remaining-requests": "invalid",
+            "x-ratelimit-reset-requests": "not-a-number",
+            "x-ratelimit-remaining-tokens": "bad",
+            "x-ratelimit-reset-tokens": "",
+        }
+        info = scheduler.handle_rate_limit_headers(headers)
+        assert info == {}

@@ -73,10 +73,10 @@ The [`RateLimitInfo`](https://github.com/sethbang/adaptive-rate-limiter/blob/mai
 |-------|------|---------|-------------|
 | `rpm_remaining` | `Optional[int]` | `None` | Remaining requests per minute |
 | `rpm_limit` | `Optional[int]` | `None` | Requests per minute limit |
-| `rpm_reset` | `Optional[float]` | `None` | Unix timestamp when RPM resets |
+| `rpm_reset` | `Optional[float]` | `None` | Absolute Unix timestamp (seconds) when RPM resets |
 | `tpm_remaining` | `Optional[int]` | `None` | Remaining tokens per minute |
 | `tpm_limit` | `Optional[int]` | `None` | Tokens per minute limit |
-| `tpm_reset` | `Optional[float]` | `None` | Unix timestamp when TPM resets |
+| `tpm_reset` | `Optional[float]` | `None` | Absolute Unix timestamp (seconds) when TPM resets |
 | `retry_after` | `Optional[int]` | `None` | Seconds to wait before retry |
 | `is_rate_limited` | `bool` | `False` | Whether request was rate limited |
 | `timestamp` | `float` | `time.time()` | When the info was captured |
@@ -144,14 +144,26 @@ class MyProvider(ProviderInterface):
         Returns:
             Normalized RateLimitInfo object
         """
+        # Coerce through float(): some APIs send integral values
+        # float-formatted ("499.0"), which a bare int() rejects.
+        def as_int(name: str, default: int) -> int:
+            try:
+                return int(float(headers[name]))
+            except (KeyError, TypeError, ValueError):
+                return default
+
         return RateLimitInfo(
-            rpm_remaining=int(headers.get("x-ratelimit-remaining-requests", 100)),
-            rpm_limit=int(headers.get("x-ratelimit-limit-requests", 100)),
-            rpm_reset=float(headers.get("x-ratelimit-reset-requests", 60)),
-            tpm_remaining=int(headers.get("x-ratelimit-remaining-tokens", 10000)),
-            tpm_limit=int(headers.get("x-ratelimit-limit-tokens", 10000)),
+            rpm_remaining=as_int("x-ratelimit-remaining-requests", 100),
+            rpm_limit=as_int("x-ratelimit-limit-requests", 100),
+            # Absolute Unix seconds. If your API sends epoch milliseconds,
+            # divide by 1000; if it sends "seconds until reset", add time.time().
+            rpm_reset=float(headers["x-ratelimit-reset-requests"])
+            if "x-ratelimit-reset-requests" in headers
+            else None,
+            tpm_remaining=as_int("x-ratelimit-remaining-tokens", 10000),
+            tpm_limit=as_int("x-ratelimit-limit-tokens", 10000),
             is_rate_limited=(status_code == 429),
-            retry_after=float(headers.get("retry-after", 0)) if status_code == 429 else None,
+            retry_after=as_int("retry-after", 0) if status_code == 429 else None,
         )
 
     async def get_bucket_for_model(
@@ -218,7 +230,7 @@ class MyProvider(ProviderInterface):
 
     def parse_rate_limit_response(self, headers, body=None, status_code=None) -> RateLimitInfo:
         return RateLimitInfo(
-            rpm_remaining=int(headers.get("x-ratelimit-remaining-requests", 100)),
+            rpm_remaining=int(float(headers.get("x-ratelimit-remaining-requests", 100))),
             is_rate_limited=(status_code == 429),
         )
 
@@ -278,6 +290,19 @@ The `resource_type` field uses plain strings:
 
 Different APIs use different header names and formats. Your provider implementation handles these differences so the core rate limiter doesn't have to.
 
+<Note>
+**Who normalizes reset headers?** The backend does, on the live feedback path.
+The scheduler calls `discover_limits()` and `get_bucket_for_model()`, but it does
+**not** call `parse_rate_limit_response()` — response headers are handed to
+`Backend.update_rate_limits(headers=...)` and parsed by
+`BaseBackend._parse_rate_limit_headers`, which accepts epoch milliseconds, epoch
+seconds or a relative delta and normalizes all three to absolute Unix seconds.
+
+Implement `parse_rate_limit_response()` for your own use (inspection, logging,
+tests, or a custom backend that calls it), but don't rely on it to change what
+the limiter ingests.
+</Note>
+
 | API | Common Headers | Reset Format |
 |-----|----------------|--------------|
 | **Standard** | `x-ratelimit-limit`, `x-ratelimit-remaining`, `x-ratelimit-reset` | Timestamp or Seconds |
@@ -319,10 +344,11 @@ class OpenAIProvider(ProviderInterface):
         self, headers: Dict[str, str], body=None, status_code=None
     ) -> RateLimitInfo:
         return RateLimitInfo(
-            rpm_remaining=int(headers.get("x-ratelimit-remaining-requests", 0)),
-            rpm_limit=int(headers.get("x-ratelimit-limit-requests", 0)),
-            tpm_remaining=int(headers.get("x-ratelimit-remaining-tokens", 0)),
-            tpm_limit=int(headers.get("x-ratelimit-limit-tokens", 0)),
+            # int(float(...)): some APIs render integral values float-formatted
+            rpm_remaining=int(float(headers.get("x-ratelimit-remaining-requests", 0))),
+            rpm_limit=int(float(headers.get("x-ratelimit-limit-requests", 0))),
+            tpm_remaining=int(float(headers.get("x-ratelimit-remaining-tokens", 0))),
+            tpm_limit=int(float(headers.get("x-ratelimit-limit-tokens", 0))),
             is_rate_limited=(status_code == 429),
             retry_after=float(headers.get("retry-after", 1)) if status_code == 429 else None,
         )

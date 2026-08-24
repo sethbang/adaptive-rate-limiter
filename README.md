@@ -152,10 +152,11 @@ class MyProvider(ProviderInterface):
     ) -> RateLimitInfo:
         """Parse rate limit headers from API response."""
         return RateLimitInfo(
-            rpm_remaining=int(headers.get("x-ratelimit-remaining-requests", 0)),
-            rpm_limit=int(headers.get("x-ratelimit-limit-requests", 0)),
-            tpm_remaining=int(headers.get("x-ratelimit-remaining-tokens", 0)),
-            tpm_limit=int(headers.get("x-ratelimit-limit-tokens", 0)),
+            # int(float(...)): some APIs render integral values float-formatted
+            rpm_remaining=int(float(headers.get("x-ratelimit-remaining-requests", 0))),
+            rpm_limit=int(float(headers.get("x-ratelimit-limit-requests", 0))),
+            tpm_remaining=int(float(headers.get("x-ratelimit-remaining-tokens", 0))),
+            tpm_limit=int(float(headers.get("x-ratelimit-limit-tokens", 0))),
             is_rate_limited=(status_code == 429),
         )
 

@@ -80,9 +80,16 @@ class TestIntelligentModeStrategyRateLimitState:
         await strategy._update_rate_limit_state(metadata, None)
 
     @pytest.mark.asyncio
-    async def test_assess_header_with_duration_strings(self, strategy):
-        """Test header assessment with duration strings (via normalization logic)."""
-        headers = {
+    async def test_assess_header_with_duration_strings(
+        self, strategy, mock_scheduler, mock_state_manager
+    ):
+        """Test header assessment with duration strings (via normalization logic).
+
+        Drives the real ``_update_rate_limit_state`` rather than re-implementing
+        its normalization loop: a copy of the loop would keep passing after the
+        production code changed, while no longer testing it.
+        """
+        mock_scheduler.extract_response_headers.return_value = {
             "x-ratelimit-remaining-requests": "99",
             "x-ratelimit-remaining-tokens": "9900",
             "x-ratelimit-limit-requests": "100",
@@ -91,16 +98,20 @@ class TestIntelligentModeStrategyRateLimitState:
             "x-ratelimit-reset-tokens": "500ms",
         }
 
-        # Simulate the logic in _update_rate_limit_state
-        for key in ["x-ratelimit-reset-requests", "x-ratelimit-reset-tokens"]:
-            if key in headers:
-                val = headers[key]
-                parsed = strategy._parse_duration_string(val)
-                if parsed is not None:
-                    headers[key] = str(parsed)
+        metadata = RequestMetadata(
+            request_id="req-duration",
+            model_id="test-model",
+            resource_type="chat",
+        )
 
-        status = strategy._assess_header_availability(headers)
-        assert status == "full"
+        await strategy._update_rate_limit_state(
+            metadata, result=Mock(), status_code=200
+        )
+
+        call = mock_state_manager.update_state_from_headers.call_args
+        headers = call.args[2] if len(call.args) > 2 else call.kwargs["headers"]
+
+        assert strategy._assess_header_availability(headers) == "full"
         assert headers["x-ratelimit-reset-requests"] == "2.0"
         assert headers["x-ratelimit-reset-tokens"] == "0.5"
 
@@ -488,3 +499,123 @@ class TestIntelligentModeStrategyRateLimitBranches:
 
         # Should be skipped - no reset time available
         assert len(eligible) == 0
+
+
+class TestResetHeaderPassthrough:
+    """The reset-header normalization must not corrupt already-numeric values.
+
+    Regression coverage for the venice-py addendum (2026-08-23). Venice sends a
+    clean integer epoch (``'1767570180000'``). ``_parse_duration_string`` takes
+    its ``float(value)`` fast path on that, and the result was written back with
+    ``str()`` -- turning ``'1767570180000'`` into ``'1767570180000.0'``. The
+    library corrupted the header and every downstream ``int()`` consumer then
+    rejected the library's own output.
+
+    The duration translation itself is still needed: OpenAI-style APIs send
+    ``'6m0s'``. Only the already-numeric case must pass through untouched.
+
+    These tests drive the real ``_update_rate_limit_state`` and assert on the
+    header dict actually handed downstream -- not on a copy of the loop.
+    """
+
+    @staticmethod
+    def _metadata():
+        return RequestMetadata(
+            request_id="req-passthrough",
+            model_id="test-model",
+            resource_type="chat",
+        )
+
+    @staticmethod
+    def _headers(reset_req, reset_tok):
+        return {
+            "x-ratelimit-remaining-requests": "499",
+            "x-ratelimit-remaining-tokens": "999000",
+            "x-ratelimit-limit-requests": "500",
+            "x-ratelimit-limit-tokens": "1000000",
+            "x-ratelimit-reset-requests": reset_req,
+            "x-ratelimit-reset-tokens": reset_tok,
+        }
+
+    @staticmethod
+    def _sent_headers(mock_state_manager):
+        """The headers dict actually passed to the state manager."""
+        call = mock_state_manager.update_state_from_headers.call_args
+        return call.args[2] if len(call.args) > 2 else call.kwargs["headers"]
+
+    @pytest.mark.asyncio
+    async def test_integer_epoch_header_is_not_rewritten(
+        self, strategy, mock_scheduler, mock_state_manager
+    ):
+        """Venice's clean integer epoch must reach the backend unchanged."""
+        mock_scheduler.extract_response_headers.return_value = self._headers(
+            "1767570180000", "1767570180000"
+        )
+
+        await strategy._update_rate_limit_state(
+            self._metadata(), result=Mock(), status_code=200
+        )
+
+        sent = self._sent_headers(mock_state_manager)
+        assert sent["x-ratelimit-reset-requests"] == "1767570180000"
+        assert sent["x-ratelimit-reset-tokens"] == "1767570180000"
+
+    @pytest.mark.asyncio
+    async def test_plain_numeric_headers_are_not_rewritten(
+        self, strategy, mock_scheduler, mock_state_manager
+    ):
+        """Any already-numeric value passes through verbatim."""
+        mock_scheduler.extract_response_headers.return_value = self._headers("60", "30")
+
+        await strategy._update_rate_limit_state(
+            self._metadata(), result=Mock(), status_code=200
+        )
+
+        sent = self._sent_headers(mock_state_manager)
+        assert sent["x-ratelimit-reset-requests"] == "60"
+        assert sent["x-ratelimit-reset-tokens"] == "30"
+
+    @pytest.mark.asyncio
+    async def test_duration_strings_are_still_translated(
+        self, strategy, mock_scheduler, mock_state_manager
+    ):
+        """OpenAI-style duration strings must still become seconds."""
+        mock_scheduler.extract_response_headers.return_value = self._headers(
+            "6m0s", "500ms"
+        )
+
+        await strategy._update_rate_limit_state(
+            self._metadata(), result=Mock(), status_code=200
+        )
+
+        sent = self._sent_headers(mock_state_manager)
+        assert sent["x-ratelimit-reset-requests"] == "360.0"
+        assert sent["x-ratelimit-reset-tokens"] == "0.5"
+
+    @pytest.mark.asyncio
+    async def test_rewritten_headers_survive_backend_parsing(
+        self, strategy, mock_scheduler, mock_state_manager
+    ):
+        """Whatever this layer emits must be parseable by the backend parser.
+
+        This is the assertion that would have caught the original defect: the
+        producer and the consumer are checked against each other.
+        """
+        from adaptive_rate_limiter.backends.base import BaseBackend
+
+        for reset_req, reset_tok in [
+            ("1767570180000", "1767570180000"),  # Venice: epoch milliseconds
+            ("6m0s", "500ms"),  # OpenAI: duration strings
+            ("60", "30"),  # plain delta seconds
+        ]:
+            mock_scheduler.extract_response_headers.return_value = self._headers(
+                reset_req, reset_tok
+            )
+            await strategy._update_rate_limit_state(
+                self._metadata(), result=Mock(), status_code=200
+            )
+            sent = self._sent_headers(mock_state_manager)
+
+            parsed = BaseBackend._parse_rate_limit_headers(BaseBackend, sent)
+            assert "rpm_reset" in parsed, f"backend dropped {sent!r}"
+            assert "tpm_reset" in parsed, f"backend dropped {sent!r}"
