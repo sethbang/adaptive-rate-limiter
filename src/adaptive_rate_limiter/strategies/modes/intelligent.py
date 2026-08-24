@@ -1062,10 +1062,17 @@ class IntelligentModeStrategy(BaseSchedulingModeStrategy):
         # Normalize headers to lowercase for case-insensitive matching
         headers = {k.lower(): v for k, v in safe_headers.items()}
 
-        # Normalize reset headers (handle duration strings)
+        # Normalize reset headers (handle duration strings like "6m0s")
         for key in ["x-ratelimit-reset-requests", "x-ratelimit-reset-tokens"]:
             if key in headers:
                 val = headers[key]
+                if self._is_numeric_header(val):
+                    # Already a number - nothing to translate. Rewriting it via
+                    # str(float(...)) would turn "1767570180000" into
+                    # "1767570180000.0", which downstream int() parsing rejects:
+                    # the library would be corrupting a clean header and then
+                    # failing to parse its own output.
+                    continue
                 parsed = self._parse_duration_string(val)
                 if parsed is not None:
                     headers[key] = str(parsed)
@@ -1127,6 +1134,33 @@ class IntelligentModeStrategy(BaseSchedulingModeStrategy):
                     )
                 except Exception as e:
                     logger.warning(f"Release failed for {ctx.reservation_id}: {e}")
+
+    @staticmethod
+    def _is_numeric_header(value: str) -> bool:
+        """
+        Report whether a header value is already a plain number.
+
+        Such values need no duration translation. Only non-numeric forms
+        ("6m0s", "500ms") do -- and only those may be rewritten, because
+        rewriting goes through ``str(float(...))`` and would otherwise append a
+        ``.0`` to a perfectly good integer.
+
+        Note this says nothing about the value's *unit*: a bare number here may
+        be epoch milliseconds, epoch seconds, or a relative delta. Resolving
+        that is ``BaseBackend._coerce_reset_header``'s job, and it is the single
+        owner of that decision.
+
+        Args:
+            value: Raw header value
+
+        Returns:
+            True if the value parses directly as a number
+        """
+        try:
+            float(value)
+        except (TypeError, ValueError):
+            return False
+        return True
 
     def _parse_duration_string(self, value: str) -> float | None:
         """
