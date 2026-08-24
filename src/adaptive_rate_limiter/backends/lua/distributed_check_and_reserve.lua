@@ -107,6 +107,11 @@ if not s.v then
     s.rst_tok = now + fb_win_tok
     s.gen_req = 1
     s.gen_tok = 1
+    -- These windows are fabricated from the fallback duration, not observed
+    -- from server headers. Mark them unverified so the first real header is
+    -- adopted outright instead of losing the staleness comparison to a guess.
+    s.vrf_req = 0
+    s.vrf_tok = 0
 end
 
 local state_changed = false
@@ -117,6 +122,7 @@ if now >= tonumber(s.rst_req) then
     s.lim_req = fb_lim_req
     s.rem_req = fb_lim_req
     s.rst_req = now + fb_win_req
+    s.vrf_req = 0  -- Re-fabricated from the fallback window; no longer observed
     s.gen_req = tonumber(s.gen_req) + 1
     redis.call('SET', pend_req_key, 0)
     redis.call('EXPIRE', pend_req_key, 86400)
@@ -129,6 +135,7 @@ if now >= tonumber(s.rst_tok) then
     s.lim_tok = fb_lim_tok
     s.rem_tok = fb_lim_tok
     s.rst_tok = now + fb_win_tok
+    s.vrf_tok = 0  -- Re-fabricated from the fallback window; no longer observed
     s.gen_tok = tonumber(s.gen_tok) + 1
     redis.call('SET', pend_tok_key, 0)
     redis.call('EXPIRE', pend_tok_key, 86400)

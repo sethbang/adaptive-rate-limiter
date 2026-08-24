@@ -178,7 +178,7 @@ backend = RedisBackend(
 | `stale_buffer` | `10` | Buffer time for stale window detection in seconds. |
 | `orphan_recovery_interval` | `30` | Interval for orphan recovery scans in seconds. |
 | `max_request_timeout` | `300` | Max time before request is considered orphaned in seconds (5min). |
-| `max_token_delta` | `120` | Maximum valid token reset delta in seconds. |
+| `max_token_delta` | `120` | Largest token-reset window (in seconds) that will be adopted from response headers. A longer window is **not** clamped into range — that would make the scheduler believe token capacity refills earlier than it does and over-send. Instead the window is left unadopted (with a one-time warning) while the observed token counts are still applied. Raise this if your provider's token window genuinely exceeds it. |
 | `log_validation_failures` | `True` | Whether to log when header validation fails. |
 | `cluster_mode` | `False` | Whether to use Redis Cluster client. |
 | `startup_nodes` | `None` | `Optional[list[tuple[str, int]]]` - List of (host, port) tuples for Redis Cluster multi-node discovery. Use this when connecting to a Redis Cluster with multiple possible entry points for high availability. |

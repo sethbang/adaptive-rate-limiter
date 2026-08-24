@@ -37,10 +37,10 @@ class RateLimitInfo:
 
     rpm_remaining: int | None = None
     rpm_limit: int | None = None
-    rpm_reset: float | None = None  # Unix timestamp
+    rpm_reset: float | None = None  # Absolute Unix timestamp, in seconds
     tpm_remaining: int | None = None
     tpm_limit: int | None = None
-    tpm_reset: float | None = None  # Unix timestamp
+    tpm_reset: float | None = None  # Absolute Unix timestamp, in seconds
     retry_after: int | None = None  # Seconds
     is_rate_limited: bool = False  # True if 429 response
     timestamp: float = field(default_factory=time.time)
@@ -106,9 +106,24 @@ class ProviderInterface(ABC):
     ) -> RateLimitInfo:
         """Parse rate limit information from an HTTP response.
 
-        This is the ONLY place where HTTP headers are parsed for rate limit
-        information. The resulting RateLimitInfo is passed to
-        Backend.update_state() to update the rate limiter's internal state.
+        .. important::
+           The library does **not** call this method on the response path.
+           Backends parse response headers themselves, in
+           ``BaseBackend._parse_rate_limit_headers``, from the ``headers``
+           argument passed to ``Backend.update_rate_limits()``. Of this
+           interface, only :meth:`discover_limits` and
+           :meth:`get_bucket_for_model` are invoked by the scheduler.
+
+           So normalization on the live feedback path is the **backend's**
+           job, not the provider's: header values are accepted as epoch
+           milliseconds, epoch seconds or a relative delta and normalized to
+           absolute Unix seconds there. A provider that normalizes reset
+           headers itself is not thereby changing what the limiter ingests.
+
+           Implement this method for your own use (application-side inspection,
+           logging, tests, or a custom backend that chooses to call it). It
+           remains part of the interface because a backend implementation is
+           free to delegate to it.
 
         Args:
             headers: HTTP response headers as a dictionary. Keys are header

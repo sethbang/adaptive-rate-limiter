@@ -16,12 +16,21 @@ Features:
 
 import abc
 import logging
+import math
 import time
 from dataclasses import dataclass
 from datetime import datetime
 from typing import Any
 
 logger = logging.getLogger(__name__)
+
+# Upper bound for a normalized reset timestamp: 2100-01-01 UTC. Mirrors the
+# `< 1600000000` (post-2020) floor the Lua scripts enforce. A finite but absurd
+# value such as 1e308 clears that floor, and the damage is not self-correcting:
+# Lua stringifies large floats in scientific notation, which breaks the int()
+# read in get_rate_limits, and the reset window advances monotonically
+# (math.max) so every later real header then loses the staleness comparison.
+_MAX_RESET_TIMESTAMP = 4102444800.0
 
 
 @dataclass
@@ -517,6 +526,81 @@ class BaseBackend(abc.ABC):
     # Helper Methods (Shared Implementation)
     # ==========================================================================
 
+    @staticmethod
+    def _coerce_int_header(value: str) -> int | None:
+        """
+        Coerce a numeric header value to ``int``, tolerating float formatting.
+
+        Providers disagree on how to render integral header values: some send
+        ``"499"``, others send ``"499.0"``. A bare ``int()`` rejects the latter,
+        so coerce through ``float`` first.
+
+        Args:
+            value: Raw header value
+
+        Returns:
+            The integer value, or None if the value is not a finite number
+        """
+        try:
+            parsed = float(value)
+        except (TypeError, ValueError):
+            return None
+        if not math.isfinite(parsed):
+            return None
+        return int(parsed)
+
+    @staticmethod
+    def _coerce_reset_header(value: str) -> float | None:
+        """
+        Normalize a rate limit reset header to an absolute Unix timestamp.
+
+        This is the single place that reconciles the three units providers use
+        for reset headers:
+
+        - Epoch milliseconds (e.g. ``"1787469826913.0"``)
+        - Epoch seconds (e.g. ``"1787469826"``)
+        - Seconds until reset, i.e. a relative delta (e.g. ``"60"``)
+
+        Args:
+            value: Raw header value
+
+        Returns:
+            Absolute Unix timestamp in seconds, or None if the value is not a
+            finite number or normalizes to a time beyond
+            ``_MAX_RESET_TIMESTAMP``.
+
+            None means "unknown" and callers must propagate that by omitting the
+            field rather than substituting a default. A guessed reset time is
+            worse than none: the Redis Lua scripts advance the stored reset
+            window monotonically (``math.max``), so a fabricated timestamp
+            cannot be walked back and would suppress real updates until the key
+            expires.
+        """
+        try:
+            parsed = float(value)
+        except (TypeError, ValueError):
+            return None
+        if not math.isfinite(parsed):
+            return None
+
+        # 1e11 is roughly year 5138, so anything larger is a millisecond epoch
+        if parsed > 1e11:
+            normalized = parsed / 1000.0
+        # 1e9 is roughly year 2001, so anything larger is already a second epoch
+        elif parsed > 1e9:
+            normalized = parsed
+        # Otherwise treat as a relative delta
+        else:
+            normalized = time.time() + parsed
+
+        # One band check on the final value covers all three input forms. No
+        # lower bound here: the Lua scripts own that, and a Python floor could
+        # reject legitimate values under clock skew.
+        if normalized > _MAX_RESET_TIMESTAMP:
+            return None
+
+        return normalized
+
     def _parse_rate_limit_headers(self, headers: dict[str, str]) -> dict[str, Any]:
         """
         Parse rate limit information from response headers.
@@ -528,11 +612,26 @@ class BaseBackend(abc.ABC):
         Standard headers parsed:
         - x-ratelimit-limit-requests: Maximum requests per minute
         - x-ratelimit-remaining-requests: Remaining requests in current window
-        - x-ratelimit-reset-requests: Time until request limit resets
+        - x-ratelimit-reset-requests: When the request limit resets
         - x-ratelimit-limit-tokens: Maximum tokens per minute
         - x-ratelimit-remaining-tokens: Remaining tokens in current window
-        - x-ratelimit-reset-tokens: Time until token limit resets
+        - x-ratelimit-reset-tokens: When the token limit resets
         - retry-after: Seconds to wait before retrying
+
+        Units (this is the contract, and it is the same for both reset fields):
+
+        - ``rpm_reset`` and ``tpm_reset`` are **absolute Unix timestamps in
+          seconds**, normalized by :meth:`_coerce_reset_header`. Providers send
+          these as epoch milliseconds, epoch seconds, or a relative delta; all
+          three are accepted on input and normalized here so no consumer has to
+          guess. Backends needing a different representation convert at their
+          own boundary (see ``RedisBackend.update_rate_limits``, which derives
+          the relative delta its Lua script expects).
+        - ``retry_after`` is a relative duration in seconds, as sent.
+        - ``timestamp`` is when parsing happened, in absolute Unix seconds.
+
+        Values that are absent or unparseable are **omitted** rather than
+        defaulted, so callers can distinguish "unknown" from a real value.
 
         Args:
             headers: Response headers with lowercase keys (normalized by caller)
@@ -545,67 +644,45 @@ class BaseBackend(abc.ABC):
         """
         result: dict[str, Any] = {}
 
-        # RPM limits - headers expected to be lowercase
-        if "x-ratelimit-limit-requests" in headers:
-            try:
-                result["rpm_limit"] = int(headers["x-ratelimit-limit-requests"])
-            except ValueError:
-                logger.warning(
-                    f"Malformed x-ratelimit-limit-requests header: "
-                    f"'{headers['x-ratelimit-limit-requests']}', skipping"
-                )
-        if "x-ratelimit-remaining-requests" in headers:
-            try:
-                result["rpm_remaining"] = int(headers["x-ratelimit-remaining-requests"])
-            except ValueError:
-                logger.warning(
-                    f"Malformed x-ratelimit-remaining-requests header: "
-                    f"'{headers['x-ratelimit-remaining-requests']}', skipping"
-                )
-        if "x-ratelimit-reset-requests" in headers:
-            try:
-                result["rpm_reset"] = int(headers["x-ratelimit-reset-requests"])
-            except ValueError:
-                logger.warning(
-                    f"Malformed x-ratelimit-reset-requests header: "
-                    f"'{headers['x-ratelimit-reset-requests']}', skipping"
-                )
+        # Table-driven so every field gets identical coercion. This bug class
+        # arose from per-field drift: retry-after already went through
+        # int(float(...)) while the other five used a bare int(), which rejects
+        # the float-formatted values some providers send (e.g. "499.0").
+        int_headers = (
+            ("rpm_limit", "x-ratelimit-limit-requests"),
+            ("rpm_remaining", "x-ratelimit-remaining-requests"),
+            ("tpm_limit", "x-ratelimit-limit-tokens"),
+            ("tpm_remaining", "x-ratelimit-remaining-tokens"),
+            ("retry_after", "retry-after"),
+        )
+        for field, header in int_headers:
+            if header in headers:
+                value = self._coerce_int_header(headers[header])
+                if value is None:
+                    logger.warning(
+                        f"Malformed {header} header: '{headers[header]}', skipping"
+                    )
+                else:
+                    result[field] = value
 
-        # TPM limits - headers expected to be lowercase
-        if "x-ratelimit-limit-tokens" in headers:
-            try:
-                result["tpm_limit"] = int(headers["x-ratelimit-limit-tokens"])
-            except ValueError:
-                logger.warning(
-                    f"Malformed x-ratelimit-limit-tokens header: "
-                    f"'{headers['x-ratelimit-limit-tokens']}', skipping"
-                )
-        if "x-ratelimit-remaining-tokens" in headers:
-            try:
-                result["tpm_remaining"] = int(headers["x-ratelimit-remaining-tokens"])
-            except ValueError:
-                logger.warning(
-                    f"Malformed x-ratelimit-remaining-tokens header: "
-                    f"'{headers['x-ratelimit-remaining-tokens']}', skipping"
-                )
-        if "x-ratelimit-reset-tokens" in headers:
-            try:
-                result["tpm_reset"] = int(headers["x-ratelimit-reset-tokens"])
-            except ValueError:
-                logger.warning(
-                    f"Malformed x-ratelimit-reset-tokens header: "
-                    f"'{headers['x-ratelimit-reset-tokens']}', skipping"
-                )
-
-        # Retry after - headers expected to be lowercase
-        if "retry-after" in headers:
-            try:
-                result["retry_after"] = int(float(headers["retry-after"]))
-            except ValueError:
-                logger.warning(
-                    f"Malformed retry-after header: "
-                    f"'{headers['retry-after']}', skipping"
-                )
+        # Reset windows are normalized to absolute Unix seconds here so that
+        # every consumer downstream shares one unit.
+        reset_headers = (
+            ("rpm_reset", "x-ratelimit-reset-requests"),
+            ("tpm_reset", "x-ratelimit-reset-tokens"),
+        )
+        for field, header in reset_headers:
+            if header in headers:
+                reset_at = self._coerce_reset_header(headers[header])
+                if reset_at is None:
+                    logger.warning(
+                        f"Malformed {header} header: '{headers[header]}', skipping"
+                    )
+                else:
+                    # Truncate to int: the Redis Lua scripts persist this into a
+                    # hash that get_rate_limits() reads back with int(), which
+                    # would raise on a float-formatted string.
+                    result[field] = int(reset_at)
 
         result["timestamp"] = int(time.time())
         return result
@@ -668,33 +745,21 @@ class BaseBackend(abc.ABC):
         Returns:
             Unix timestamp (seconds since epoch)
         """
+        # Numeric forms (epoch ms, epoch seconds, relative delta) share one
+        # owner so this method and _parse_rate_limit_headers cannot drift apart.
+        numeric = self._coerce_reset_header(reset_str)
+        if numeric is not None:
+            return numeric
+
         try:
-            # Try parsing as number
-            val = float(reset_str)
-
-            # Heuristic to detect milliseconds timestamp (e.g. 1764830040000)
-            # 1e11 is roughly year 5138, so anything larger is likely ms
-            if val > 1e11:
-                return val / 1000.0
-
-            # Heuristic to detect seconds timestamp (e.g. 1764830040)
-            # 1e9 is roughly year 2001, so anything larger is likely sec timestamp
-            if val > 1e9:
-                return val
-
-            # Otherwise treat as delta seconds
-            return time.time() + val
-
-        except ValueError:
-            try:
-                # Try parsing as ISO datetime
-                dt = datetime.fromisoformat(reset_str.replace("Z", "+00:00"))
-                return dt.timestamp()
-            except (ValueError, TypeError, AttributeError) as e:
-                # Log the fallback for monitoring
-                logger.warning(
-                    f"Failed to parse reset time '{reset_str}', using 60s fallback. "
-                    f"Error: {e}. This may indicate a provider API change."
-                )
-                # Default to 60 seconds from now
-                return time.time() + 60
+            # Try parsing as ISO datetime
+            dt = datetime.fromisoformat(reset_str.replace("Z", "+00:00"))
+            return dt.timestamp()
+        except (ValueError, TypeError, AttributeError) as e:
+            # Log the fallback for monitoring
+            logger.warning(
+                f"Failed to parse reset time '{reset_str}', using 60s fallback. "
+                f"Error: {e}. This may indicate a provider API change."
+            )
+            # Default to 60 seconds from now
+            return time.time() + 60

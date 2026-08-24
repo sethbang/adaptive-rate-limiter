@@ -7,6 +7,56 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ## [Unreleased]
 
+## [1.2.1] - 2026-08-24
+
+### Fixed
+
+- **Self-inflicted header corruption**: `IntelligentModeStrategy` normalized the
+  reset headers by running every value through `_parse_duration_string()` and
+  writing the result back with `str()`. For an already-numeric value that
+  round-trip appended a `.0` -- a clean `"1767570180000"` from the API became
+  `"1767570180000.0"` -- and every downstream `int()` consumer then rejected the
+  library's own output. Numeric values now pass through untouched; the duration
+  translation still applies to OpenAI-style forms such as `"6m0s"`.
+- **`Scheduler.handle_rate_limit_headers` (BASIC mode)**: the same bare-`int()`
+  defect dropped float-formatted values, silently returning a partial dict.
+  Values are now coerced through `float()`, with non-finite input (`inf`,
+  `nan`) still dropped rather than raising.
+- **Rate-limit header ingestion (float-formatted values)**: reset, limit and
+  remaining headers are now coerced through `float` before `int`, so
+  float-formatted values such as `"1787469826913.0"` are accepted instead of
+  being discarded as malformed. Combined with the header corruption above, this
+  left the limiter rejecting every rate-limit update and running purely on its
+  configured/discovered limits with no live server feedback.
+- **Reset-header unit contract**: `_parse_rate_limit_headers` now documents and
+  guarantees that `rpm_reset`/`tpm_reset` are **absolute Unix timestamps in
+  seconds**, normalizing the epoch-milliseconds, epoch-seconds and
+  relative-delta forms providers use. `RedisBackend` derives the relative delta
+  its Lua script expects at that boundary, so the two reset fields no longer
+  disagree about units. A token window longer than `max_token_delta` is not
+  clamped into range -- that would tell the scheduler capacity refills earlier
+  than it does and cause over-sending; instead the window is left unadopted
+  (and a one-time warning names the knob to raise) while the observed token
+  counts are still applied. Unparseable values are
+  still omitted rather than defaulted, so "unknown" stays distinguishable from
+  a real value.
+- **Absurd reset timestamps could permanently freeze a model's state**: a
+  finite-but-nonsensical reset value (e.g. `"1e308"`) cleared the Lua
+  `< 1600000000` floor, was stored in scientific notation -- which broke
+  `get_rate_limits()`'s `int()` read for that model -- and, because the reset
+  window only ever advances via `math.max`, made every subsequent real header
+  fail the staleness check until the key expired 24h later. Reset values are now
+  bounded above (year 2100) in both the parser and the Lua guards, mirroring the
+  existing floor.
+- **Fabricated reset windows shadowing real ones**: the Lua state hash now
+  tracks whether a reset window was observed from response headers
+  (`vrf_req`/`vrf_tok`) or fabricated by `check_and_reserve` from the fallback
+  window duration. The staleness check is only applied between real
+  observations, so the first genuine header after a cold start or window
+  rotation is adopted outright instead of losing to a guess that happened to
+  sit further in the future. Existing state without the flag reads as
+  unverified and self-heals on the next response; no schema version bump.
+
 ## [1.2.0] - 2026-08-24
 
 ### Added
@@ -252,7 +302,8 @@ Initial public release of Adaptive Rate Limiter.
   - `[full]`: All optional dependencies
 - **License**: Apache-2.0
 
-[Unreleased]: https://github.com/sethbang/adaptive-rate-limiter/compare/v1.2.0...HEAD
+[Unreleased]: https://github.com/sethbang/adaptive-rate-limiter/compare/v1.2.1...HEAD
+[1.2.1]: https://github.com/sethbang/adaptive-rate-limiter/compare/v1.2.0...v1.2.1
 [1.2.0]: https://github.com/sethbang/adaptive-rate-limiter/compare/v1.1.0...v1.2.0
 [1.1.0]: https://github.com/sethbang/adaptive-rate-limiter/compare/v1.0.2...v1.1.0
 [1.0.2]: https://github.com/sethbang/adaptive-rate-limiter/compare/v1.0.1...v1.0.2
