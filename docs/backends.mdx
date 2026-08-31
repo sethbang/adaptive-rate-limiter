@@ -182,6 +182,8 @@ backend = RedisBackend(
 | `log_validation_failures` | `True` | Whether to log when header validation fails. |
 | `cluster_mode` | `False` | Whether to use Redis Cluster client. |
 | `startup_nodes` | `None` | `Optional[list[tuple[str, int]]]` - List of (host, port) tuples for Redis Cluster multi-node discovery. Use this when connecting to a Redis Cluster with multiple possible entry points for high availability. |
+| `failure_threshold` | `None` | Consecutive-window failure count that opens the circuit breaker. `None` uses `DEFAULT_FAILURE_THRESHOLD` (20). |
+| `failure_window_seconds` | `None` | Rolling window, in seconds, over which failures are counted. `None` selects `CLUSTER_FAILURE_WINDOW` (120) in cluster mode and `DEFAULT_FAILURE_WINDOW` (30) otherwise. The window must be **longer than the worst-case connect time**, or failures age out faster than a single failed connect can accumulate them and the breaker can never trip; a cluster connect retries `CLUSTER_PING_ATTEMPTS` times and can span ~45s, which is why cluster mode defaults higher. A warning is logged if you set a cluster window shorter than that budget. |
 
 ### Environment Variables
 

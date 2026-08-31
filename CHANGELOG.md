@@ -7,6 +7,181 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ## [Unreleased]
 
+## [1.3.0] - 2026-08-31
+
+### Fixed
+
+- **Partial rate-limit headers are now synced per dimension.** Providers that
+  meter requests but not tokens (or the reverse) send fewer than six
+  `x-ratelimit-*` headers. Every layer of the state-sync path treated that as
+  unusable, and the failures compounded:
+  - `IntelligentModeStrategy._assess_header_availability` required all six
+    headers before syncing. A request-metered-only provider therefore fell to
+    release-only on every response, so `update_rate_limits` was never called,
+    the bucket never verified, and the limiter ran on fabricated cold-start
+    limits for the life of the process. It failed silently -- release-only logs
+    at debug and the release script returns success, so no diagnostic fired.
+    Assessment is now per dimension: one complete dimension is enough to sync.
+  - `RedisBackend.update_rate_limits` rendered absent headers as fabricated
+    defaults (`0` for remaining, `DEFAULT_RPM_LIMIT`/`DEFAULT_TPM_LIMIT` for
+    limits, `0` for both resets), destroying the "absent vs. real value"
+    distinction `_parse_rate_limit_headers` deliberately preserves. Absent
+    fields now travel as the `ABSENT` sentinel, which the Lua scripts test for
+    presence.
+  - The update Lua scripts validated all six fields jointly, so one unusable
+    field discarded a complete, valid report on the other dimension. Each
+    dimension is now validated and applied independently.
+  - `MemoryBackend.update_rate_limits` had the same defaults, plus an
+    unconditional `is_verified = True`. Unreported dimensions are now carried
+    forward and `is_verified` reflects what the server actually reported.
+- **Absent token reset no longer fabricates an expired window.** An absent
+  `x-ratelimit-reset-tokens` was sent as `0`, which the script read as "resets
+  now" rather than "unknown": it adopted an already-expired window, marked it
+  verified, and the next reservation rotated the bucket to a limit the server
+  never granted. Over successive windows the state oscillated between a
+  fabricated empty and a fabricated full bucket, over-sending on each rotation.
+- **`has_headers` is now dimension-aware.** It tested only
+  `rpm_remaining`, so a provider that meters tokens but not requests counted as
+  reporting no headers at all: on the 5xx path its valid token data was routed
+  to the release-only script, and the new missing-`status_code` warning below
+  never fired for it. The same asymmetry as the two items above, one layer up.
+- **A reported limit of `0` is applied instead of rejecting the update.** The
+  guard `head_lim_req < 1 or head_lim_tok < 1` treated a real `0` as malformed
+  and discarded the whole response, including the valid fields on the other
+  dimension. On the 429 path this threw away the server's `remaining-requests`
+  at the moment it mattered most. A `0` limit is now read as "no capacity on
+  that dimension" -- see *Assumptions* below.
+
+- **The circuit breaker is now wired to real failures.** `record_failure()` had
+  no production call sites: it was declared on `BaseBackend`, implemented on
+  both backends, and called only by tests and `force_circuit_break()`.
+  `_failure_timestamps` stayed empty forever, `is_circuit_broken()` was always
+  `False`, and the `MemoryBackend` fallback in `check_and_reserve_capacity` was
+  unreachable code. The effect was the opposite of the intended design: with
+  Redis unavailable the backend denied all capacity indefinitely instead of
+  degrading to conservative local limits. Failures are now recorded in the
+  cluster ping loop, the standalone ping, `get_model_limits` (which swallows
+  its exception and runs before the breaker gate), and the connection handlers
+  in `check_and_reserve_capacity` and `update_rate_limits`.
+- **The breaker window is reconciled with the cluster retry budget.** Even once
+  wired, the breaker could not trip in cluster mode: a single failed connect
+  spans ~45s of ping retries while the failure window was 30s, so the earliest
+  failures aged out before the call returned and the count plateaued at 17
+  against a threshold of 20 — mathematically unable to trip, forever. The
+  window now defaults to `CLUSTER_FAILURE_WINDOW` (120s) in cluster mode, and a
+  warning fires if a configured window is shorter than the worst-case connect.
+- **Tearing down the fallback clears the failure history**, so a backend that
+  reconnects successfully stops counting stale failures against itself.
+  Deliberately tied to teardown rather than to *every* successful connect: the
+  cluster ping loop retries up to `CLUSTER_PING_ATTEMPTS` times, so clearing on
+  any success would erase the failures recorded by that same call, and a
+  flapping cluster — one that always connects eventually, after tens of seconds
+  of retries — could never trip the breaker however degraded it became.
+
+- **`force_circuit_break` no longer depends on a hardcoded failure count.** It
+  appended exactly 25 synthetic failures, which silently became a no-op once
+  `failure_threshold` was configurable (`failure_threshold=30` and the forced
+  break never opened the circuit), and capped the break at
+  `failure_window_seconds` regardless of the duration requested, because those
+  failures aged out of the rolling window. It now records a deadline.
+
+- **Only connection failures from `get_model_limits` feed the breaker.** That
+  block also catches decode errors from a corrupt model-limits cache entry, and
+  the in-memory cache is written only on the hit path — so one bad entry was
+  re-read and re-recorded on every call, driving a healthy Redis into fallback
+  within seconds.
+
+- **A 5xx carrying an incomplete dimension releases its reservation again.**
+  Routing on `remaining` alone sent such a response to the update script, which
+  rejects both dimensions and returns `0` before reaching the pending
+  decrement, leaking capacity until orphan recovery. Script selection now
+  requires a *complete* dimension, mirroring `req_ok`/`tok_ok` in the Lua.
+
+- **An unreported dimension no longer freezes the MemoryBackend refill clock.**
+  `used_local_*` is now recorded at the min-comparison, where the local value
+  actually wins, instead of being inferred afterwards by re-testing equality.
+  A carried-forward dimension — and a server value that merely matches the
+  local one — both compared equal, pinning `last_updated` so
+  `check_and_reserve_capacity` re-credited an interval the server-reported
+  remaining already accounted for.
+
+### Changed
+
+- `BaseBackend.get_failure_count` and its implementations now take
+  `window_seconds: float | None = None`, where `None` means the backend's own
+  configured window. `RedisBackend.get_failure_count()` therefore reports a
+  120s count in cluster mode where it previously reported 30s.
+- `MemoryBackend.is_circuit_broken` is documented as deliberately not driven by
+  `record_failure`: it has no external dependency that can become unreachable —
+  it *is* the fallback target — so its circuit opens only via
+  `force_circuit_break`. Behavior is unchanged; the contract is now stated.
+
+### Added
+
+- `failure_threshold` and `failure_window_seconds` constructor parameters on
+  `RedisBackend`, with `DEFAULT_FAILURE_THRESHOLD`, `DEFAULT_FAILURE_WINDOW`
+  and `CLUSTER_FAILURE_WINDOW` class constants. The cluster ping budget is now
+  named too (`CLUSTER_PING_ATTEMPTS`, `CLUSTER_PING_TIMEOUT`,
+  `CLUSTER_PING_MAX_BACKOFF`) so the window can be reasoned about against it.
+- `RedisBackend.ABSENT`, the sentinel passed to the update Lua scripts for a
+  header the server did not send. A numeric sentinel could not be used: `-1`
+  parses cleanly, so a provider reporting `-1` for unknown or unlimited would
+  be indistinguishable from it.
+- A warning when `update_rate_limits` is called with rate-limit headers but
+  `status_code=None`. `None` means "no HTTP response was received", so the
+  headers are discarded and only the reservation is released -- but `None` is
+  also the parameter default, making an omitted argument silently lossless of
+  all header state. Direct backend callers are affected; the bundled scheduler
+  always passes a status code.
+
+### Documentation
+
+- **The provider examples taught the defect this release fixes.** Every
+  `parse_rate_limit_response` sample in `README.md` and `docs/providers.mdx`
+  collapsed an absent header into a fabricated default (`0`, `100`, `10000`)
+  before it ever reached the backend, so the per-dimension sync could not see
+  the absence it now depends on. A provider written from those samples would
+  fabricate a token window and have it marked verified. The samples now return
+  `None` for an absent header, which is what every `RateLimitInfo` field is
+  typed for. The `0` default had become actively harmful: it used to be
+  discarded by the old `< 1` validation, and is now honoured as "no capacity
+  on this dimension".
+
+- `RedisBackend`'s new `failure_threshold` and `failure_window_seconds`
+  parameters are documented in `docs/backends.mdx`, including why the window
+  has to exceed the cluster connect budget.
+
+### Known characteristics
+
+- **Recovery from an open circuit is not uniformly fast.** When
+  `get_model_limits` can answer from its in-memory cache it does not call
+  `_ensure_connected`, and the fallback block returns before reaching it too —
+  so while the circuit is open nothing runs the teardown, and recovery waits
+  for the rolling window to age out (up to `CLUSTER_FAILURE_WINDOW`, 120s, in
+  cluster mode). A deployment that has run limit discovery is in exactly that
+  state, so this is a normal path, not an edge case. The backend serves
+  requests from the conservative fallback throughout — degraded, not down.
+  Closing this needs a half-open probe while in fallback, which is left as a
+  follow-up alongside the cluster ping budget.
+
+- **The 429 update path is verified by construction, not in the field.** Its
+  Lua script is covered against a real Redis and its release-before-guard
+  ordering is confirmed (`pending_req`/`pending_tok` both settle to `0`), but
+  no live provider 429 has exercised it end to end. Forcing one risks tripping
+  provider-side abuse lockouts, so this stays the thinnest evidence in the
+  release.
+
+### Assumptions
+
+- A provider reporting a limit of `0` is read as **"no capacity on that
+  dimension"**, not "this dimension is not metered". No known provider emits a
+  real `0` (the case that prompted this was a reporting artifact upstream), so
+  this is unverified against live traffic. It over-throttles if the provider
+  meant "not metered", which fails loudly and recoverably rather than silently
+  earning 429s. With the `ABSENT` sentinel in place, absent and real-zero are
+  now distinguishable, so this reading can be changed without a data-format
+  change.
+
 ## [1.2.1] - 2026-08-24
 
 ### Fixed
@@ -302,7 +477,8 @@ Initial public release of Adaptive Rate Limiter.
   - `[full]`: All optional dependencies
 - **License**: Apache-2.0
 
-[Unreleased]: https://github.com/sethbang/adaptive-rate-limiter/compare/v1.2.1...HEAD
+[Unreleased]: https://github.com/sethbang/adaptive-rate-limiter/compare/v1.3.0...HEAD
+[1.3.0]: https://github.com/sethbang/adaptive-rate-limiter/compare/v1.2.1...v1.3.0
 [1.2.1]: https://github.com/sethbang/adaptive-rate-limiter/compare/v1.2.0...v1.2.1
 [1.2.0]: https://github.com/sethbang/adaptive-rate-limiter/compare/v1.1.0...v1.2.0
 [1.1.0]: https://github.com/sethbang/adaptive-rate-limiter/compare/v1.0.2...v1.1.0

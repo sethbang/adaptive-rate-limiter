@@ -622,111 +622,106 @@ class TestRedisClusterFailover:
         await asyncio.sleep(2.0)
 
     @pytest.mark.asyncio
+    @pytest.mark.timeout(300)
     async def test_circuit_breaker_during_cluster_failure(
         self,
         cluster_node_controller,
         failover_cluster_backend,
     ):
-        """
-        Test circuit breaker activation and fallback during complete cluster failure.
+        """Circuit breaker opens and the fallback serves when the cluster dies.
 
-        Scenario:
-        1. Verify normal operation
-        2. Stop all master nodes (nodes 1, 2, 3) to simulate complete cluster failure
-        3. Verify circuit breaker activates after enough failures
-        4. Verify fallback to MemoryBackend occurs
-        5. Verify operations continue (with degraded performance)
-        6. Restart nodes and verify recovery
+        This test used to be vacuous in three separate ways, all fixed here:
+
+        1. Every meaningful assertion sat inside ``if circuit_broken:``, and
+           the circuit could never break - ``record_failure`` had no production
+           call sites at all, so the whole body was dead. The assertions below
+           are unconditional.
+        2. It stopped nodes 1, 2, 3 and called them "all master nodes". That
+           holds only on a freshly built cluster; an earlier test that triggers
+           a real failover leaves a replica promoted, so the test would stop a
+           replica and quietly exercise nothing. Masters are now discovered.
+        3. Its waits (``wait_for_failover(timeout=60.0)`` plus fixed sleeps)
+           could not fit inside the 60s global pytest timeout. Waits are now
+           bounded polls under an explicit longer timeout.
         """
         import asyncio
 
         backend = failover_cluster_backend
         controller = cluster_node_controller
-
-        # Ensure connection works initially
-        await backend._ensure_connected()
-
         test_model = "circuit-breaker-test-model"
+        limits = {"rpm_limit": 100, "tpm_limit": 10000}
 
-        # Step 1: Verify normal operation
-        success, _initial_request_id = await backend.check_and_reserve_capacity(
-            key=test_model,
-            requests=1,
-            tokens=100,
-            bucket_limits={"rpm_limit": 100, "tpm_limit": 10000},
-        )
-        assert success is True
-        assert not backend.is_in_fallback_mode(), "Should not be in fallback initially"
-
-        # Step 2: Stop ALL master nodes (1, 2, 3) - replicas are 4, 5, 6
-        # In a 6-node cluster with 3 masters and 3 replicas, stopping all masters
-        # will prevent the cluster from accepting writes
-        await controller.stop_node(1)
-        await controller.stop_node(2)
-        await controller.stop_node(3)
-
-        # Wait for cluster to detect multiple failures
-        await asyncio.sleep(3.0)
-
-        # Step 3: Attempt multiple operations to trigger circuit breaker
-        # The circuit breaker activates after enough failures (default: 20 in 30s)
-        # We'll attempt operations that should fail and trigger the circuit breaker
-        failure_count = 0
-        for _attempt in range(25):
-            try:
-                await backend.check_and_reserve_capacity(
-                    key=test_model,
-                    requests=1,
-                    tokens=10,
-                    bucket_limits={"rpm_limit": 100, "tpm_limit": 10000},
-                )
-            except Exception:
-                failure_count += 1
-            await asyncio.sleep(0.1)  # Small delay between attempts
-
-        # Step 4: Verify circuit breaker is now broken
-        circuit_broken = await backend.is_circuit_broken()
-
-        # Step 5: If circuit is broken, verify fallback mode
-        if circuit_broken:
-            # Next operation should use fallback backend
-            fallback_success, _ = await backend.check_and_reserve_capacity(
-                key=test_model,
-                requests=1,
-                tokens=10,
-                bucket_limits={"rpm_limit": 100, "tpm_limit": 10000},
+        async def _reserve(tokens=10):
+            return await backend.check_and_reserve_capacity(
+                key=test_model, requests=1, tokens=tokens, bucket_limits=limits
             )
-            # In fallback mode, operations should succeed via MemoryBackend
-            assert fallback_success is True, "Fallback mode operation should succeed"
-            assert backend.is_in_fallback_mode(), "Should be in fallback mode"
 
-        # Step 6: Restart all master nodes
-        await controller.start_node(1)
-        await controller.start_node(2)
-        await controller.start_node(3)
+        async def _poll(predicate, timeout, interval=0.5):
+            """Poll until predicate() is truthy. Returns False on timeout."""
+            loop = asyncio.get_running_loop()
+            deadline = loop.time() + timeout
+            while loop.time() < deadline:
+                if await predicate():
+                    return True
+                await asyncio.sleep(interval)
+            return False
 
-        # Wait for cluster to fully recover
-        await asyncio.sleep(5.0)
-        cluster_recovered = await controller.wait_for_failover(timeout=60.0)
-        assert cluster_recovered, "Cluster did not recover after restarting nodes"
-
-        # Step 7: Wait for circuit breaker to reset (may take up to 30 seconds)
-        # Force a connection refresh to clear the failure timestamps
-        await asyncio.sleep(5.0)
-
-        # Attempt to reconnect - the backend should eventually recover
-        # and exit fallback mode on successful Redis operations
+        # --- Step 1: healthy baseline -------------------------------------
         await backend._ensure_connected()
+        success, _ = await _reserve(tokens=100)
+        assert success is True
+        assert not backend.is_in_fallback_mode()
+        assert await backend.is_circuit_broken() is False
 
-        # Verify we can make a reservation after recovery
-        # (Note: fallback state may clear on successful reconnect)
-        recovery_success, _ = await backend.check_and_reserve_capacity(
-            key=test_model,
-            requests=1,
-            tokens=100,
-            bucket_limits={"rpm_limit": 100, "tpm_limit": 10000},
+        # --- Step 2: stop the nodes that are ACTUALLY masters --------------
+        masters = await controller.get_master_node_nums()
+        assert masters, "cluster reported no masters"
+
+        for node_num in masters:
+            await controller.stop_node(node_num)
+
+        try:
+            # --- Step 3: the breaker must open, unconditionally ------------
+            async def _drive_until_broken():
+                await _reserve()
+                return await backend.is_circuit_broken()
+
+            assert await _poll(_drive_until_broken, timeout=90.0, interval=0.0), (
+                "circuit breaker never opened with every master down"
+            )
+
+            # --- Step 4: the fallback must engage and serve ----------------
+            async def _fallback_serving():
+                ok, _ = await _reserve(tokens=1)
+                return backend.is_in_fallback_mode() and ok
+
+            assert await _poll(_fallback_serving, timeout=60.0, interval=0.2), (
+                "fallback did not engage and serve requests while Redis was down"
+            )
+
+        finally:
+            # --- Step 5: restore the cluster ------------------------------
+            for node_num in masters:
+                await controller.start_node(node_num)
+
+        assert await controller.wait_for_failover(timeout=90.0), (
+            "cluster did not recover after restarting the stopped masters"
         )
-        assert recovery_success is True, "Post-recovery operation should succeed"
+
+        # --- Step 6: the fallback must tear down ---------------------------
+        # Recovery depends on the rolling failure window closing on its own:
+        # while the circuit is open nothing reaches the teardown on
+        # _ensure_connected's success branch. This is the assertion that would
+        # catch a breaker that latches instead of decaying.
+        async def _recovered():
+            ok, _ = await _reserve(tokens=100)
+            return ok and not backend.is_in_fallback_mode()
+
+        assert await _poll(_recovered, timeout=90.0, interval=1.0), (
+            "backend never left fallback mode after the cluster recovered"
+        )
+
+        assert await backend.is_circuit_broken() is False
 
     @pytest.mark.asyncio
     async def test_pause_unpause_node_simulation(

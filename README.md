@@ -151,12 +151,23 @@ class MyProvider(ProviderInterface):
         status_code: Optional[int] = None,
     ) -> RateLimitInfo:
         """Parse rate limit headers from API response."""
+
+        # int(float(...)): some APIs render integral values float-formatted.
+        # Return None for an absent header instead of a default. A limit of 0
+        # is a real value meaning "no capacity on this dimension", so it can't
+        # also stand in for "the server didn't say" -- and the backend syncs
+        # the request and token dimensions independently, leaving an
+        # unreported one untouched rather than fabricating it. A provider that
+        # meters requests but not tokens just leaves the tpm_* fields None.
+        def as_int(name: str) -> Optional[int]:
+            raw = headers.get(name)
+            return int(float(raw)) if raw is not None else None
+
         return RateLimitInfo(
-            # int(float(...)): some APIs render integral values float-formatted
-            rpm_remaining=int(float(headers.get("x-ratelimit-remaining-requests", 0))),
-            rpm_limit=int(float(headers.get("x-ratelimit-limit-requests", 0))),
-            tpm_remaining=int(float(headers.get("x-ratelimit-remaining-tokens", 0))),
-            tpm_limit=int(float(headers.get("x-ratelimit-limit-tokens", 0))),
+            rpm_remaining=as_int("x-ratelimit-remaining-requests"),
+            rpm_limit=as_int("x-ratelimit-limit-requests"),
+            tpm_remaining=as_int("x-ratelimit-remaining-tokens"),
+            tpm_limit=as_int("x-ratelimit-limit-tokens"),
             is_rate_limited=(status_code == 429),
         )
 

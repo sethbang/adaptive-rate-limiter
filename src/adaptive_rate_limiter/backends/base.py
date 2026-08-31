@@ -292,6 +292,14 @@ class BaseBackend(abc.ABC):
         """
         Get the number of failures within the specified window.
 
+        This signature is part of the public backend interface and is
+        deliberately left as-is. Implementations MAY widen the parameter -
+        ``RedisBackend`` accepts ``float | None``, where ``None`` means its own
+        configured window, which it enlarges in cluster mode so that failures
+        cannot age out faster than a retrying connect can produce them.
+        Widening is safe for subclasses; narrowing this base signature would
+        break every third-party backend that implements it.
+
         Args:
             window_seconds: Time window in seconds (default 30)
 

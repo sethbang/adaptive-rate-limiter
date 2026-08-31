@@ -250,6 +250,27 @@ class RedisBackend(BaseBackend):
     # Class-level Lua scripts loaded from files
     _lua_scripts: ClassVar[dict[str, str]] = {}
 
+    # Cluster connect retry budget. Promoted to constants because the circuit
+    # breaker's window has to be reconciled against them: see
+    # DEFAULT_FAILURE_WINDOW below.
+    CLUSTER_PING_ATTEMPTS = 12
+    CLUSTER_PING_TIMEOUT = 5.0
+    CLUSTER_PING_MAX_BACKOFF = 2.0
+
+    # Circuit breaker. The window MUST exceed the longest a single failed
+    # connection attempt can take, or failures age out faster than they can
+    # accumulate and the breaker can never trip - which is exactly what
+    # happened in cluster mode: one connect spans ~45s of retries while the
+    # window was 30s, so the count plateaued below the threshold forever.
+    DEFAULT_FAILURE_THRESHOLD = 20
+    DEFAULT_FAILURE_WINDOW = 30.0
+    CLUSTER_FAILURE_WINDOW = 120.0
+
+    # Sentinel passed to the update Lua scripts for a header the server did not
+    # send. ``tonumber("")`` is nil in Lua, so a script can test presence without
+    # any numeric value being able to collide with it.
+    ABSENT = ""
+
     # Conservative fallback limits
     DEFAULT_RPM_LIMIT = 20
     DEFAULT_TPM_LIMIT = 500000
@@ -300,6 +321,8 @@ class RedisBackend(BaseBackend):
         | None = None,  # Cluster URL (env var fallback: REDIS_CLUSTER_URL)
         startup_nodes: list[tuple[str, int]]
         | None = None,  # Multiple cluster startup nodes
+        failure_threshold: int | None = None,  # Circuit breaker trip threshold
+        failure_window_seconds: float | None = None,  # Circuit breaker window
     ) -> None:
         """
         Initialize distributed Redis backend.
@@ -362,6 +385,7 @@ class RedisBackend(BaseBackend):
         # Models already warned about an out-of-range token reset window,
         # so the diagnostic is logged once rather than every response.
         self._warned_token_delta: set[str] = set()
+        self._warned_no_status: set[str] = set()
         self.log_validation_failures = log_validation_failures
 
         # Base64 encode account_id for safe key construction
@@ -396,7 +420,39 @@ class RedisBackend(BaseBackend):
         self._model_limits_lock = asyncio.Lock()
 
         # Failure tracking for circuit breaker
+        self.failure_threshold = (
+            self.DEFAULT_FAILURE_THRESHOLD
+            if failure_threshold is None
+            else failure_threshold
+        )
+        # The window must outlast a single failed connection attempt, or
+        # failures age out faster than they accumulate and the breaker can
+        # never reach the threshold. A cluster connect retries
+        # CLUSTER_PING_ATTEMPTS times, so its worst case is far longer than the
+        # standalone default.
+        if failure_window_seconds is not None:
+            self.failure_window_seconds = failure_window_seconds
+        elif cluster_mode:
+            self.failure_window_seconds = self.CLUSTER_FAILURE_WINDOW
+        else:
+            self.failure_window_seconds = self.DEFAULT_FAILURE_WINDOW
+
+        worst_case_connect = self.CLUSTER_PING_ATTEMPTS * (
+            self.CLUSTER_PING_TIMEOUT + self.CLUSTER_PING_MAX_BACKOFF
+        )
+        if cluster_mode and self.failure_window_seconds < worst_case_connect:
+            logger.warning(
+                f"failure_window_seconds={self.failure_window_seconds}s is shorter "
+                f"than the worst-case cluster connect of {worst_case_connect:.0f}s. "
+                f"Failures may age out faster than they accumulate, leaving the "
+                f"circuit breaker unable to trip."
+            )
+
         self._failure_timestamps: list[float] = []
+        # Absolute deadline for an operator-forced break. Kept separate from
+        # the failure list so a forced break cannot be defeated by a threshold
+        # it does not know about, nor aged out by the rolling window.
+        self._forced_break_until: float = 0.0
         self._failure_lock = asyncio.Lock()
 
         # Key prefixes
@@ -617,12 +673,12 @@ class RedisBackend(BaseBackend):
                             # 1. Detect node failure (5s cluster-node-timeout)
                             # 2. Promote replica to master
                             # 3. Update slot mappings across the cluster
-                            max_ping_attempts = 12
+                            max_ping_attempts = self.CLUSTER_PING_ATTEMPTS
                             for attempt in range(max_ping_attempts):
                                 try:
                                     await asyncio.wait_for(
                                         cast(Awaitable[bool], self._redis.ping()),
-                                        timeout=5.0,
+                                        timeout=self.CLUSTER_PING_TIMEOUT,
                                     )
                                     ping_success = True
                                     break
@@ -632,6 +688,13 @@ class RedisBackend(BaseBackend):
                                     asyncio.TimeoutError,
                                 ) as e:
                                     last_ping_error = e
+                                    # Each failed attempt is a real failed
+                                    # round-trip and counts toward the circuit
+                                    # breaker. Counting per call instead would
+                                    # make the 20-in-30s threshold unreachable
+                                    # in cluster mode, where one failed connect
+                                    # already spans ~45s of retries.
+                                    await self.record_failure("connection", str(e))
                                     logger.debug(
                                         f"Cluster ping attempt {attempt + 1}/{max_ping_attempts} failed: {e}. "
                                         f"Waiting for cluster failover and refreshing topology..."
@@ -639,7 +702,10 @@ class RedisBackend(BaseBackend):
                                     # Wait longer to give the cluster time to complete failover.
                                     # The cluster needs ~5 seconds to detect failure, plus time
                                     # for replica promotion. Use exponential backoff capped at 2s.
-                                    delay = min(1.0 * (1.5**attempt), 2.0)
+                                    delay = min(
+                                        1.0 * (1.5**attempt),
+                                        self.CLUSTER_PING_MAX_BACKOFF,
+                                    )
                                     await asyncio.sleep(delay)
 
                                     # Force topology refresh after waiting
@@ -661,10 +727,18 @@ class RedisBackend(BaseBackend):
                                 )
                         else:
                             # Standard Redis - single ping attempt
-                            await asyncio.wait_for(
-                                cast(Awaitable[bool], self._redis.ping()),
-                                timeout=5.0,
-                            )
+                            try:
+                                await asyncio.wait_for(
+                                    cast(Awaitable[bool], self._redis.ping()),
+                                    timeout=5.0,
+                                )
+                            except (
+                                ConnectionError,
+                                TimeoutError,
+                                asyncio.TimeoutError,
+                            ) as e:
+                                await self.record_failure("connection", str(e))
+                                raise
 
                         self._connected = True
 
@@ -771,6 +845,18 @@ class RedisBackend(BaseBackend):
                                 FALLBACK_DURATION_METRIC.labels(
                                     reason="circuit_breaker"
                                 ).observe(duration)
+
+                                # Clear the failure history alongside the
+                                # fallback it opened. Deliberately NOT done on
+                                # every successful connect: the cluster ping
+                                # loop retries up to CLUSTER_PING_ATTEMPTS
+                                # times, so clearing there would erase the
+                                # failures recorded by that same call. A
+                                # flapping cluster - one that always connects
+                                # eventually, after 30s of retries - would then
+                                # never be able to trip the breaker no matter
+                                # how degraded it got.
+                                await self.clear_failures()
 
                                 # Discard fallback state - do NOT try to reconcile
                                 # Fresh API headers will sync state on next request
@@ -967,7 +1053,19 @@ class RedisBackend(BaseBackend):
                         limits.get("rpm", self.DEFAULT_RPM_LIMIT),
                         limits.get("tpm", self.DEFAULT_TPM_LIMIT),
                     )
+        except (ConnectionError, TimeoutError) as e:
+            # This path swallows the exception and returns defaults, so without
+            # recording here the breaker would stay blind to it - and it is the
+            # call that burns the most time against a dead Redis, since it runs
+            # before the circuit-breaker gate in check_and_reserve_capacity.
+            await self.record_failure("connection", str(e))
+            logger.warning(f"Failed to get model limits from Redis: {e}")
         except Exception as e:
+            # Deliberately NOT recorded as a breaker failure. This block also
+            # catches decode errors from a corrupt model-limits cache entry,
+            # and the in-memory cache is only written on the hit path above -
+            # so a single bad entry would be re-read and re-recorded on every
+            # call, driving a healthy Redis into fallback within seconds.
             logger.warning(f"Failed to get model limits from Redis: {e}")
 
         # Fall back to conservative defaults
@@ -1153,6 +1251,7 @@ class RedisBackend(BaseBackend):
             return (False, f"UNKNOWN_ERROR:{status_code}")
 
         except (ConnectionError, TimeoutError) as e:
+            await self.record_failure("connection", str(e))
             logger.error(f"Redis connection error during check_and_reserve: {e}")
             return (False, None)
         except ResponseError as e:
@@ -1201,7 +1300,20 @@ class RedisBackend(BaseBackend):
             # Unknown status: safe default is release only
             return "distributed_release_capacity"
 
-    def _token_reset_delta(self, tpm_reset: int | None, model: str = "") -> int:
+    def _header_arg(self, parsed: dict[str, Any], field: str) -> int | str:
+        """
+        Render one parsed header field as a Lua ARGV value.
+
+        Returns the integer when the server reported it, and :attr:`ABSENT`
+        when it did not. Defaulting here instead would destroy the distinction
+        :meth:`BaseBackend._parse_rate_limit_headers` deliberately preserves by
+        omitting absent fields, and the scripts would then be unable to tell a
+        provider's real ``0`` from a value this library invented.
+        """
+        value = parsed.get(field)
+        return self.ABSENT if value is None else int(value)
+
+    def _token_reset_delta(self, tpm_reset: int | None, model: str = "") -> int | str:
         """
         Convert an absolute token-reset timestamp into the delta ARGV[6] expects.
 
@@ -1225,13 +1337,21 @@ class RedisBackend(BaseBackend):
             tpm_reset: Absolute Unix timestamp in seconds, or None if unknown
             model: Model identifier, used only for the diagnostic log
 
+        Args note - a reset of exactly 0 is a real value, not an absence, and
+        is reported as such. Testing it for falsiness (as this did before)
+        collapsed the two and lost a genuine "resets now".
+
         Returns:
-            Seconds until the token window resets, floored at 0. Returns 0 when
-            the reset time is unknown, which the Lua guards reject cleanly
-            rather than acting on a guess.
+            Seconds until the token window resets, floored at 0, or
+            :attr:`ABSENT` when the server did not report a token reset.
+            ABSENT makes the script skip the token window entirely. Returning 0
+            here instead - as this did before - is not "unknown": it reads as
+            "resets now", so the script adopted an already-expired window,
+            stamped it verified, and the next reservation rotated the bucket to
+            a fabricated limit the server never granted.
         """
-        if not tpm_reset:
-            return 0
+        if tpm_reset is None:
+            return self.ABSENT
 
         delta = max(0, int(tpm_reset - time.time()))
 
@@ -1361,9 +1481,45 @@ class RedisBackend(BaseBackend):
                 logger.warning("update_rate_limits called without request_id")
             return 0
 
-        # Parse headers to determine if we have usable rate limit data
+        # Parse headers to determine if we have usable rate limit data.
+        #
+        # Either dimension counts. Testing only the request side - as this did
+        # before - was the same asymmetry fixed in the Lua scripts and the mode
+        # strategy: a provider that meters tokens but not requests reported no
+        # headers at all, so its valid token data was routed to the release-only
+        # script on the 5xx path and the missing-status_code warning below never
+        # fired for it.
         parsed = self._parse_rate_limit_headers(headers)
-        has_headers = parsed.get("rpm_remaining") is not None
+
+        # A dimension counts only when it is COMPLETE, mirroring req_ok/tok_ok
+        # in the Lua. Testing `remaining` alone routed a 5xx carrying a partial
+        # dimension (say remaining-tokens with no limit or reset) to the update
+        # script, which rejects both dimensions and returns 0 before it reaches
+        # the pending decrement - leaking the reservation until orphan
+        # recovery, where the release-only script would have freed it.
+        def _dimension_complete(prefix: str) -> bool:
+            return all(
+                parsed.get(f"{prefix}_{field}") is not None
+                for field in ("remaining", "limit", "reset")
+            )
+
+        has_headers = _dimension_complete("rpm") or _dimension_complete("tpm")
+
+        # A caller that passes rate-limit headers but no status_code is very
+        # likely just omitting the argument rather than reporting "no HTTP
+        # response was received" - the two are indistinguishable, because None
+        # is both the sentinel and the default. _select_script tests
+        # `status_code is None` first, so the headers are silently discarded and
+        # the release path returns 1, leaving log_validation_failures with
+        # nothing to report. Say so, once per model.
+        if status_code is None and has_headers and model not in self._warned_no_status:
+            self._warned_no_status.add(model)
+            logger.warning(
+                f"update_rate_limits called for {model!r} with rate-limit "
+                f"headers but status_code=None. None means 'no HTTP response "
+                f"was received', so the headers will be discarded and only the "
+                f"reservation released. Pass the real status code to sync state."
+            )
 
         # Select script based on status code and header availability
         script_name = self._select_script(status_code, has_headers)
@@ -1390,13 +1546,22 @@ class RedisBackend(BaseBackend):
             else:
                 # Update scripts need header values
                 # Pass max_token_delta as ARGV[8] for validation in Lua script
+                # Absent fields are passed as "" - the ABSENT sentinel - never
+                # as a fabricated default. ``tonumber("")`` is nil in Lua, so
+                # the scripts distinguish "the server did not say" from a real
+                # value and skip only that dimension.
+                #
+                # A numeric sentinel cannot be used here: -1 parses cleanly via
+                # _coerce_int_header, so a provider sending "-1" for unknown or
+                # unlimited would be indistinguishable from the sentinel - the
+                # exact conflation this exists to remove.
                 args = [
-                    parsed.get("rpm_remaining", 0),
-                    parsed.get("tpm_remaining", 0),
-                    parsed.get("rpm_limit", self.DEFAULT_RPM_LIMIT),
-                    parsed.get("tpm_limit", self.DEFAULT_TPM_LIMIT),
+                    self._header_arg(parsed, "rpm_remaining"),
+                    self._header_arg(parsed, "tpm_remaining"),
+                    self._header_arg(parsed, "rpm_limit"),
+                    self._header_arg(parsed, "tpm_limit"),
                     # ARGV[5]: absolute Unix seconds, as the parser produces it
-                    parsed.get("rpm_reset", 0),
+                    self._header_arg(parsed, "rpm_reset"),
                     # ARGV[6]: derived here, since the script wants a delta
                     self._token_reset_delta(parsed.get("tpm_reset"), model),
                     self.stale_buffer,
@@ -1418,6 +1583,7 @@ class RedisBackend(BaseBackend):
             return result
 
         except (ConnectionError, TimeoutError) as e:
+            await self.record_failure("connection", str(e))
             logger.error(f"Redis connection error during update_rate_limits: {e}")
             return 0
         except ResponseError as e:
@@ -1891,22 +2057,34 @@ class RedisBackend(BaseBackend):
         """Record a failure for circuit breaker."""
         async with self._failure_lock:
             self._failure_timestamps.append(time.time())
-            # Keep only recent failures
-            cutoff = time.time() - 30
+            # Prune against the CONFIGURED window. Pruning at a fixed 30s while
+            # the window is longer would silently discard the failures the
+            # breaker is counting on.
+            cutoff = time.time() - self.failure_window_seconds
             self._failure_timestamps = [
                 ts for ts in self._failure_timestamps if ts > cutoff
             ]
 
-    async def get_failure_count(self, window_seconds: int = 30) -> int:
-        """Get failure count in time window."""
+    async def get_failure_count(self, window_seconds: float | None = None) -> int:
+        """Get failure count in time window (defaults to the configured window)."""
+        window = (
+            self.failure_window_seconds if window_seconds is None else (window_seconds)
+        )
         async with self._failure_lock:
-            cutoff = time.time() - window_seconds
+            cutoff = time.time() - window
             return len([ts for ts in self._failure_timestamps if ts > cutoff])
 
-    async def is_circuit_broken(self, failure_threshold: int = 20) -> bool:
+    async def is_circuit_broken(self, failure_threshold: int | None = None) -> bool:
         """Check if circuit breaker is triggered."""
-        failure_count = await self.get_failure_count(30)
-        return failure_count >= failure_threshold
+        # Plain float read, so no await point and no lock needed -- taking
+        # _failure_lock here would deadlock against get_failure_count below.
+        if time.time() < self._forced_break_until:
+            return True
+        threshold = (
+            self.failure_threshold if failure_threshold is None else failure_threshold
+        )
+        failure_count = await self.get_failure_count()
+        return failure_count >= threshold
 
     async def get_rate_limits(self, model: str) -> dict[str, Any]:
         """Get current rate limit state for a model.
@@ -2056,7 +2234,7 @@ class RedisBackend(BaseBackend):
             "connected": self._connected,
             "in_flight_requests": len(self._in_flight),
             "cached_model_limits": len(self._model_limits),
-            "failure_count": await self.get_failure_count(30),
+            "failure_count": await self.get_failure_count(),
             "circuit_broken": await self.is_circuit_broken(),
             "fallback_mode_active": self._fallback_backend is not None,
         }
@@ -2091,16 +2269,23 @@ class RedisBackend(BaseBackend):
                 self._connected = False
 
     async def clear_failures(self) -> None:
-        """Clear all failure records."""
+        """Clear all failure records, including an operator-forced break."""
         async with self._failure_lock:
             self._failure_timestamps.clear()
+            self._forced_break_until = 0.0
 
     async def force_circuit_break(self, duration: float) -> None:
-        """Force circuit break for duration."""
+        """Force the circuit open for ``duration`` seconds.
+
+        Recorded as a deadline rather than as synthetic failures. Fabricating
+        a fixed 25 failures made this silently do nothing once the threshold
+        became configurable (``failure_threshold=30`` and the forced break
+        never opened the circuit), and it also capped the break at
+        ``failure_window_seconds`` no matter what duration was requested,
+        because the synthetic failures aged out of the rolling window.
+        """
         async with self._failure_lock:
-            current_time = time.time()
-            for _ in range(25):  # More than threshold
-                self._failure_timestamps.append(current_time)
+            self._forced_break_until = time.time() + duration
 
         async def clear_after_delay() -> None:
             await asyncio.sleep(duration)
