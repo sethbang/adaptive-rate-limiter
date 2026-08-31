@@ -45,6 +45,10 @@ class MemoryBackend(BaseBackend):
         - Production environments with high availability requirements
     """
 
+    # Default rolling window for failure counting (observability only;
+    # see is_circuit_broken).
+    DEFAULT_FAILURE_WINDOW = 30.0
+
     def __init__(
         self,
         namespace: str = "rate_limiter_memory",
@@ -659,18 +663,32 @@ class MemoryBackend(BaseBackend):
                 self._token_counts[model].append((current_time, tokens_used))
 
     async def record_failure(self, error_type: str, error_message: str = "") -> None:
-        """Record a failure for tracking."""
+        """Record a failure for tracking.
+
+        Recorded for observability only; see :meth:`is_circuit_broken`.
+        """
         async with self._lock:
             self._failures.append((time.time(), error_type, error_message))
 
-    async def get_failure_count(self, window_seconds: int = 30) -> int:
+    async def get_failure_count(self, window_seconds: float | None = None) -> int:
         """Get the number of failures within the specified window."""
+        window = (
+            self.DEFAULT_FAILURE_WINDOW if window_seconds is None else (window_seconds)
+        )
         async with self._lock:
-            cutoff = time.time() - window_seconds
+            cutoff = time.time() - window
             return sum(1 for ts, _, _ in self._failures if ts > cutoff)
 
     async def is_circuit_broken(self) -> bool:
-        """Check if the circuit breaker is triggered."""
+        """Check if the circuit breaker is triggered.
+
+        Note that this is deliberately NOT driven by :meth:`record_failure`.
+        Unlike ``RedisBackend`` there is no external dependency here that can
+        become unreachable - this backend *is* the thing others fall back to -
+        so its circuit only opens when opened explicitly via
+        :meth:`force_circuit_break`. ``record_failure`` and
+        ``get_failure_count`` remain available for observability.
+        """
         async with self._lock:
             if self._circuit_broken_until is None:
                 return False
@@ -722,9 +740,22 @@ class MemoryBackend(BaseBackend):
             if key in self._states:
                 existing_state, _ = self._states[key]
 
+            # Which dimensions the server actually reported. An absent field
+            # must leave its dimension untouched: defaulting it to 0 here read
+            # "the server did not say" as "the server said zero", which is a
+            # value no server sends alongside a fabricated limit.
+            rpm_reported = "rpm_remaining" in parsed
+            tpm_reported = "tpm_remaining" in parsed
+
+            prior = existing_state or {}
+
             # Calculate new values using Sequence Numbers for Drift Correction
-            new_remaining_requests = parsed.get("rpm_remaining", 0)
-            new_remaining_tokens = parsed.get("tpm_remaining", 0)
+            new_remaining_requests = parsed.get(
+                "rpm_remaining", prior.get("remaining_requests", 0)
+            )
+            new_remaining_tokens = parsed.get(
+                "tpm_remaining", prior.get("remaining_tokens", 0)
+            )
 
             # Drift Correction Logic:
             # If we have a request_id, we can determine exactly how many requests were
@@ -732,7 +763,7 @@ class MemoryBackend(BaseBackend):
             # This eliminates the "State Erasure" problem where updating from a header
             # ignores subsequent requests.
             in_flight_requests = 0
-            if request_id and request_id in self._request_sequences:
+            if rpm_reported and request_id and request_id in self._request_sequences:
                 seq_resp = self._request_sequences.pop(request_id)
                 # Also remove the timestamp tracking
                 self._request_sequence_timestamps.pop(request_id, None)
@@ -750,41 +781,54 @@ class MemoryBackend(BaseBackend):
                 # Note: We don't track token sequence, so we can't adjust tokens precisely.
                 # But typically requests are the bottleneck for 429s in this context.
 
+            # Set when the local count strictly beat the server's and was kept.
+            # Recorded here, at the comparison, rather than inferred afterwards
+            # by re-testing equality: an unreported dimension carries the prior
+            # value forward and a server value that merely *matches* the local
+            # one are both equal-but-not-"used local", and treating them as
+            # such freezes the refill clock below.
+            used_local_requests = False
+            used_local_tokens = False
+
             if existing_state:
                 current_remaining_requests = existing_state.get("remaining_requests", 0)
                 current_remaining_tokens = existing_state.get("remaining_tokens", 0)
 
-                # Use the minimum of local and (adjusted) server values
-                if current_remaining_requests < new_remaining_requests:
+                # Use the minimum of local and (adjusted) server values.
+                # Only meaningful where the server actually reported: an
+                # unreported dimension already carries the local value forward.
+                if rpm_reported and current_remaining_requests < new_remaining_requests:
                     new_remaining_requests = current_remaining_requests
+                    used_local_requests = True
 
-                if current_remaining_tokens < new_remaining_tokens:
+                if tpm_reported and current_remaining_tokens < new_remaining_tokens:
                     new_remaining_tokens = current_remaining_tokens
+                    used_local_tokens = True
 
             # Determine the correct last_updated timestamp
             final_last_updated = time.time()
 
-            if existing_state:
-                used_local_requests = new_remaining_requests == existing_state.get(
-                    "remaining_requests", 0
-                )
-                used_local_tokens = new_remaining_tokens == existing_state.get(
-                    "remaining_tokens", 0
-                )
-
-                if (
-                    used_local_requests or used_local_tokens
-                ) and "last_updated" in existing_state:
-                    # We are using local state, so we must respect its timestamp
-                    final_last_updated = existing_state["last_updated"]
+            if (
+                existing_state
+                and (used_local_requests or used_local_tokens)
+                and "last_updated" in existing_state
+            ):
+                # We are using local state, so we must respect its timestamp
+                final_last_updated = existing_state["last_updated"]
 
             state_data = {
                 "remaining_requests": new_remaining_requests,
                 "remaining_tokens": new_remaining_tokens,
-                "request_limit": parsed.get("rpm_limit", 100),
-                "token_limit": parsed.get("tpm_limit", 10000),
+                # Carry the prior limit forward when the server did not report
+                # one, rather than inventing a magic number and storing it as
+                # though it had been observed.
+                "request_limit": parsed.get(
+                    "rpm_limit", prior.get("request_limit", 100)
+                ),
+                "token_limit": parsed.get("tpm_limit", prior.get("token_limit", 10000)),
                 "last_updated": final_last_updated,
-                "is_verified": True,
+                # Verified only where the server actually told us something.
+                "is_verified": rpm_reported or tpm_reported,
             }
             self._states[key] = (state_data, expiry)
             if expiry is not None:

@@ -47,25 +47,47 @@ local head_rst_tok_delta = tonumber(ARGV[6])
 local stale_buffer = tonumber(ARGV[7]) or 10
 local max_tok_delta = tonumber(ARGV[8]) or 120
 
--- Validate Headers (fail fast)
-if not head_rem_req or not head_rem_tok or not head_lim_req or not head_lim_tok or not head_rst_req or not head_rst_tok_delta then
-    return 0
+-- Validate each dimension INDEPENDENTLY.
+--
+-- An absent field arrives as the ABSENT sentinel ("") and is nil after
+-- tonumber, which is why presence is testable at all: the Python boundary
+-- never substitutes a default, so nil here means "the server did not say"
+-- and can never be a value the server actually sent.
+--
+-- The two dimensions must not be able to reject one another. Validating them
+-- jointly - as this did before - meant one unusable field discarded a complete,
+-- valid report on the other side: a provider that meters requests but not
+-- tokens could never sync any state at all.
+local req_ok = head_rem_req ~= nil and head_lim_req ~= nil and head_rst_req ~= nil
+if req_ok then
+    req_ok = head_rem_req >= 0
+        -- A limit of 0 is a REAL value, applied as reported. It is not treated
+        -- as malformed: skipping it would leave the fabricated cold-start
+        -- limit standing as though it were observed, and over-send against a
+        -- server that just said it has no capacity. Reading a 0 limit as "no
+        -- capacity" over-throttles if the provider meant "not metered", but
+        -- that fails loudly and recoverably rather than silently earning 429s.
+        and head_lim_req >= 0
+        -- Floor: must be an absolute Unix timestamp (post-2020)
+        and head_rst_req >= 1600000000
+        -- Ceiling: beyond year 2100. A finite-but-absurd value (e.g. 1e308)
+        -- clears the floor, gets stored in scientific notation (breaking the
+        -- int() read in get_rate_limits), and can never be walked back because
+        -- rst_req only ever advances via math.max below.
+        and head_rst_req <= 4102444800
 end
 
--- Validate header format sanity
-if head_rem_req < 0 or head_rem_tok < 0 then return 0 end
-if head_lim_req < 1 or head_lim_tok < 1 then return 0 end
--- Floor: must be an absolute Unix timestamp (post-2020)
-if head_rst_req < 1600000000 then return 0 end
--- Ceiling: beyond year 2100. A finite-but-absurd value (e.g. 1e308) clears
--- the floor, gets stored in scientific notation (breaking the int() read in
--- get_rate_limits), and can never be walked back because rst_req only ever
--- advances via math.max below.
-if head_rst_req > 4102444800 then return 0 end
--- A negative delta is malformed input. The UPPER bound is deliberately not
--- checked here: exceeding it must not discard the whole update, only the
--- token window (see the token block below).
-if head_rst_tok_delta < 0 then return 0 end
+local tok_ok = head_rem_tok ~= nil and head_lim_tok ~= nil and head_rst_tok_delta ~= nil
+if tok_ok then
+    -- A negative delta is malformed input. The UPPER bound is deliberately not
+    -- checked here: exceeding it must not discard the token dimension, only the
+    -- token WINDOW (see the token block below).
+    tok_ok = head_rem_tok >= 0 and head_lim_tok >= 0 and head_rst_tok_delta >= 0
+end
+
+-- Nothing usable on either side: no state change, so the caller can safely
+-- release the reservation without risking a double-decrement.
+if not req_ok and not tok_ok then return 0 end
 
 -- 1. Get Mapping
 local map_val = redis.call('GET', req_map_key)
@@ -116,7 +138,7 @@ local curr_pend_tok = tonumber(redis.call('GET', pend_tok_key) or 0)
 -- further in the future than the server's real reset roughly 5 times out of 6,
 -- and would otherwise reject every genuine update.
 local vrf_req = tonumber(s.vrf_req or 0)
-if vrf_req == 0 or head_rst_req >= (tonumber(s.rst_req or 0) - stale_buffer) then
+if req_ok and (vrf_req == 0 or head_rst_req >= (tonumber(s.rst_req or 0) - stale_buffer)) then
     -- Not stale - update
     s.rem_req = math.max(0, head_rem_req - curr_pend_req)
     s.lim_req = head_lim_req  -- Header is authoritative: accept increases AND decreases (tier changes)
@@ -131,38 +153,44 @@ end
 
 -- Token Window (x-ratelimit-reset-tokens is seconds until reset - RELATIVE)
 -- Use Redis server time for calculation (consistent clock source)
-local calc_rst_tok = now + head_rst_tok_delta
-local vrf_tok = tonumber(s.vrf_tok or 0)
+-- Guarded: with the token dimension absent, head_rst_tok_delta is nil and the
+-- arithmetic below would raise. Skipping leaves rst_tok/vrf_tok untouched, so
+-- the bucket stays honestly unverified on this dimension instead of adopting a
+-- window it was never told about.
+if tok_ok then
+    local calc_rst_tok = now + head_rst_tok_delta
+    local vrf_tok = tonumber(s.vrf_tok or 0)
 
--- A delta beyond max_tok_delta means the observed token window is not what this
--- deployment is configured to expect. Do NOT clamp it into range: the script
--- would then treat a shortened window as observed, rotate early in
--- check_and_reserve, and refill rem_tok to the fallback limit before the server
--- actually refilled - i.e. over-send. Believing the window is longer only
--- over-throttles, which is recoverable.
---
--- The observed COUNTS are still applied either way: they are directly reported
--- and not in doubt, and dropping them would strand rem_tok at the fallback,
--- which over-sends immediately rather than only at rotation.
-if head_rst_tok_delta > max_tok_delta then
-    -- No trustworthy window, so no staleness comparison is possible. Take the
-    -- lower of local and reported remaining, matching the conservative update
-    -- the in-memory backend uses. rst_tok and vrf_tok are left untouched so a
-    -- later in-range header is still adopted outright rather than being
-    -- compared against a fabricated window.
-    s.rem_tok = math.min(tonumber(s.rem_tok or head_rem_tok), math.max(0, head_rem_tok - curr_pend_tok))
-    s.lim_tok = head_lim_tok
-elseif vrf_tok == 0 or calc_rst_tok >= (tonumber(s.rst_tok or 0) - stale_buffer) then
-    -- Not stale (with buffer) - update
-    s.rem_tok = math.max(0, head_rem_tok - curr_pend_tok)
-    s.lim_tok = head_lim_tok  -- Header is authoritative: accept increases AND decreases (tier changes)
-    if vrf_tok == 0 then
-        -- Adopt the observed window; never math.max against a fabricated value
-        s.rst_tok = calc_rst_tok
-    else
-        s.rst_tok = math.max(tonumber(s.rst_tok or 0), calc_rst_tok)
+    -- A delta beyond max_tok_delta means the observed token window is not what this
+    -- deployment is configured to expect. Do NOT clamp it into range: the script
+    -- would then treat a shortened window as observed, rotate early in
+    -- check_and_reserve, and refill rem_tok to the fallback limit before the server
+    -- actually refilled - i.e. over-send. Believing the window is longer only
+    -- over-throttles, which is recoverable.
+    --
+    -- The observed COUNTS are still applied either way: they are directly reported
+    -- and not in doubt, and dropping them would strand rem_tok at the fallback,
+    -- which over-sends immediately rather than only at rotation.
+    if head_rst_tok_delta > max_tok_delta then
+        -- No trustworthy window, so no staleness comparison is possible. Take the
+        -- lower of local and reported remaining, matching the conservative update
+        -- the in-memory backend uses. rst_tok and vrf_tok are left untouched so a
+        -- later in-range header is still adopted outright rather than being
+        -- compared against a fabricated window.
+        s.rem_tok = math.min(tonumber(s.rem_tok or head_rem_tok), math.max(0, head_rem_tok - curr_pend_tok))
+        s.lim_tok = head_lim_tok
+    elseif vrf_tok == 0 or calc_rst_tok >= (tonumber(s.rst_tok or 0) - stale_buffer) then
+        -- Not stale (with buffer) - update
+        s.rem_tok = math.max(0, head_rem_tok - curr_pend_tok)
+        s.lim_tok = head_lim_tok  -- Header is authoritative: accept increases AND decreases (tier changes)
+        if vrf_tok == 0 then
+            -- Adopt the observed window; never math.max against a fabricated value
+            s.rst_tok = calc_rst_tok
+        else
+            s.rst_tok = math.max(tonumber(s.rst_tok or 0), calc_rst_tok)
+        end
+        s.vrf_tok = 1
     end
-    s.vrf_tok = 1
 end
 
 local save_args = {}

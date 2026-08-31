@@ -3708,8 +3708,18 @@ class TestUpdateRateLimitsHeaderUnits:
         assert argv[6] == 0
 
     @pytest.mark.asyncio
-    async def test_missing_reset_headers_still_send_zero(self, backend, mock_redis):
-        """Absent reset headers keep sending 0 so the Lua guards reject cleanly."""
+    async def test_missing_reset_headers_send_absent_not_zero(
+        self, backend, mock_redis
+    ):
+        """Absent reset headers send the ABSENT sentinel, never 0.
+
+        This test previously asserted 0 was sent, on the belief that the Lua
+        guards would "reject cleanly". They did not: 0 is a real value, so
+        ARGV[5] failed the timestamp floor and discarded the whole update,
+        while ARGV[6] read as "the token window resets now" - the script
+        adopted an already-expired window, marked it verified, and the next
+        reservation rotated the bucket to a fabricated limit.
+        """
         headers = {
             "x-ratelimit-limit-requests": "500",
             "x-ratelimit-remaining-requests": "499",
@@ -3722,8 +3732,11 @@ class TestUpdateRateLimitsHeaderUnits:
         )
 
         argv = self._argv(mock_redis)
-        assert argv[5] == 0
-        assert argv[6] == 0
+        assert argv[5] == backend.ABSENT
+        assert argv[6] == backend.ABSENT
+        # The counts the server DID report still travel as real values.
+        assert argv[1] == 499
+        assert argv[3] == 500
 
     @pytest.mark.asyncio
     async def test_429_path_uses_same_conversion(self, backend, mock_redis):

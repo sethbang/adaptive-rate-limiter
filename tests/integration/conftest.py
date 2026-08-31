@@ -350,6 +350,62 @@ class ClusterNodeController:
 
         return result
 
+    async def get_master_node_nums(self) -> list[int]:
+        """
+        Return the node numbers currently acting as masters.
+
+        Which nodes are masters is NOT fixed. A prior test that triggers a real
+        failover leaves a replica promoted, so hardcoding "nodes 1, 2, 3 are the
+        masters" is only true on a freshly built cluster. A test that stops the
+        wrong three nodes silently exercises a different scenario than it claims.
+
+        Returns:
+            Sorted node numbers (1-6) whose CLUSTER NODES flags say ``master``.
+        """
+        for probe in range(1, NODE_COUNT + 1):
+            if probe in self._stopped_nodes or probe in self._paused_nodes:
+                continue
+
+            container = self._get_container(probe)
+            port = NODE_PORTS[probe]
+            cmd = f"redis-cli -p {port} CLUSTER NODES"
+            try:
+                exec_result = await asyncio.to_thread(
+                    container.exec_run, cmd, demux=True
+                )
+            except Exception as e:  # pragma: no cover - container churn
+                logger.debug(f"CLUSTER NODES failed on node {probe}: {e}")
+                continue
+
+            if exec_result.exit_code != 0:
+                continue
+
+            stdout = exec_result.output[0]
+            if not stdout:
+                continue
+
+            port_to_num = {v: k for k, v in NODE_PORTS.items()}
+            masters: set[int] = set()
+            for line in stdout.decode().splitlines():
+                fields = line.split()
+                if len(fields) < 3:
+                    continue
+                # <id> <ip:port@cport> <flags> ...
+                addr, flags = fields[1], fields[2]
+                if "master" not in flags.split(","):
+                    continue
+                try:
+                    node_port = int(addr.split("@")[0].rsplit(":", 1)[1])
+                except (IndexError, ValueError):
+                    continue
+                if node_port in port_to_num:
+                    masters.add(port_to_num[node_port])
+
+            if masters:
+                return sorted(masters)
+
+        raise RuntimeError("Could not determine cluster masters from any live node")
+
     async def wait_for_failover(self, timeout: float = 30.0) -> bool:
         """
         Wait for cluster to stabilize after a failure.

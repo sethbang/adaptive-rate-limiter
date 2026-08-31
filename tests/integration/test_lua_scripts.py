@@ -666,11 +666,19 @@ class TestUpdateRateLimits:
         assert req_map is None, "Mapping should be deleted after update"
 
     @pytest.mark.asyncio
-    async def test_update_rejects_invalid_headers(self, redis, script_shas):
-        """Test rejection of invalid header values."""
+    async def test_update_skips_invalid_dimension_keeps_valid_one(
+        self, redis, script_shas
+    ):
+        """An invalid dimension is skipped without discarding the valid one.
+
+        Previously a single bad field rejected the whole update, so a valid
+        report on the other dimension was thrown away with it. The invalid
+        dimension must still never be applied.
+        """
         reserve_sha = script_shas["distributed_check_and_reserve"]
         update_sha = script_shas["distributed_update_rate_limits"]
         keys = get_keys(req_id="invalid-headers")
+        state_key = keys[0]
 
         # Reserve first
         await redis.evalsha(
@@ -703,7 +711,22 @@ class TestUpdateRateLimits:
             10,
             120,
         )
-        assert result == 0, "Should reject negative remaining"
+        # The token dimension was valid and is applied, so this is a success.
+        assert result == 1, "Valid token dimension should still be applied"
+
+        state = await redis.hgetall(state_key)
+
+        # The invalid request dimension must be skipped entirely - never
+        # stored, and never marked verified off a value we rejected.
+        assert int(state[b"rem_req"]) != -1, "Negative remaining must not be stored"
+        assert int(state.get(b"vrf_req", 0)) == 0, (
+            "Request dimension must not be marked verified from an invalid header"
+        )
+
+        # The valid token dimension landed.
+        assert int(state[b"rem_tok"]) == 400000
+        assert int(state[b"lim_tok"]) == 1000000
+        assert int(state[b"vrf_tok"]) == 1
 
     @pytest.mark.asyncio
     async def test_update_accepts_limit_decrease(self, redis, script_shas):

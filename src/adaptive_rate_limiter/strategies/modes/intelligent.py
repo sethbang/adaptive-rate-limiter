@@ -1212,34 +1212,60 @@ class IntelligentModeStrategy(BaseSchedulingModeStrategy):
         """
         Assess header availability for state sync.
 
-        Validates both presence AND basic value sanity.
+        Validates both presence AND basic value sanity, per DIMENSION rather
+        than across all six headers at once.
+
+        Requiring all six - as this did before - meant a provider that meters
+        requests but not tokens could never sync any state at all. Every
+        response fell through to release-only, so ``update_rate_limits`` was
+        never called, the bucket never verified, and the limiter ran on
+        fabricated cold-start limits for the life of the process. It failed
+        silently: release-only logs at debug, and the release script returns
+        success, so no diagnostic ever fired.
+
+        A dimension is usable only when all three of its headers are present
+        and parseable; the backend then applies the dimensions that are present
+        and leaves the others untouched.
 
         Returns:
-            "full" - All 6 required headers present with parseable values
-            "partial" - Some headers present but not all 6 or some invalid
+            "full" - At least one dimension is complete, so a sync is worth
+                doing. Not "all six present": a request-only provider is fully
+                syncable on the dimension it actually reports.
+            "partial" - Headers present, but no single dimension is complete.
+                Nothing can be trusted on its own, so release-only.
             "none" - No usable rate limit headers
         """
-        full_set = [
-            "x-ratelimit-remaining-requests",
-            "x-ratelimit-remaining-tokens",
-            "x-ratelimit-limit-requests",
-            "x-ratelimit-limit-tokens",
-            "x-ratelimit-reset-requests",
-            "x-ratelimit-reset-tokens",
-        ]
+        dimensions = (
+            (
+                "x-ratelimit-remaining-requests",
+                "x-ratelimit-limit-requests",
+                "x-ratelimit-reset-requests",
+            ),
+            (
+                "x-ratelimit-remaining-tokens",
+                "x-ratelimit-limit-tokens",
+                "x-ratelimit-reset-tokens",
+            ),
+        )
 
         valid_count = 0
-        for h in full_set:
-            value = headers.get(h)
-            if value:
-                # Basic sanity check - must be parseable as number
-                try:
-                    float(value)
-                    valid_count += 1
-                except (ValueError, TypeError):
-                    pass  # Invalid value doesn't count
+        complete_dimensions = 0
+        for dimension in dimensions:
+            dimension_valid = 0
+            for h in dimension:
+                value = headers.get(h)
+                if value:
+                    # Basic sanity check - must be parseable as number
+                    try:
+                        float(value)
+                        dimension_valid += 1
+                    except (ValueError, TypeError):
+                        pass  # Invalid value doesn't count
+            valid_count += dimension_valid
+            if dimension_valid == len(dimension):
+                complete_dimensions += 1
 
-        if valid_count == 6:
+        if complete_dimensions:
             return "full"
         elif valid_count > 0:
             return "partial"
