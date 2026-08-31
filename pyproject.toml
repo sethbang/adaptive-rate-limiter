@@ -48,7 +48,7 @@ dependencies = ["pydantic>=2.0.0,<3.0.0"]
 [project.urls]
 Homepage = "https://github.com/sethbang/adaptive-rate-limiter"
 Repository = "https://github.com/sethbang/adaptive-rate-limiter"
-Documentation = "https://github.com/sethbang/adaptive-rate-limiter/blob/main/README.md"
+Documentation = "https://arl.sbang.dev"
 Changelog = "https://github.com/sethbang/adaptive-rate-limiter/blob/main/CHANGELOG.md"
 Issues = "https://github.com/sethbang/adaptive-rate-limiter/issues"
 

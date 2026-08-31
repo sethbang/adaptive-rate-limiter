@@ -472,16 +472,18 @@ Modules, classes, and functions prefixed with `_` (single underscore) are intern
 
 ## Documentation
 
-Full documentation is available in the [docs/](docs/) directory:
+Full documentation is published at **[arl.sbang.dev](https://arl.sbang.dev)**:
 
-- [Quick Start](docs/quickstart.mdx) - Get started quickly
-- [Configuration](docs/configuration.mdx) - All configuration options
-- [Backends](docs/backends.mdx) - Memory and Redis backends
-- [Providers](docs/providers.mdx) - Custom provider integration
-- [Streaming](docs/streaming.mdx) - Streaming response handling
-- [Observability](docs/observability.mdx) - Metrics and monitoring
-- [Exceptions](docs/exceptions.mdx) - Exception hierarchy
-- [Reservation Tracking](docs/reservation-tracking.mdx) - Orphan detection
+- [Quick Start](https://arl.sbang.dev/quickstart) - Get started quickly
+- [Configuration](https://arl.sbang.dev/configuration) - All configuration options
+- [Backends](https://arl.sbang.dev/backends) - Memory and Redis backends
+- [Providers](https://arl.sbang.dev/providers) - Custom provider integration
+- [Streaming](https://arl.sbang.dev/streaming) - Streaming response handling
+- [Observability](https://arl.sbang.dev/observability) - Metrics and monitoring
+- [Exceptions](https://arl.sbang.dev/exceptions) - Exception hierarchy
+- [Reservation Tracking](https://arl.sbang.dev/reservation-tracking) - Orphan detection
+
+The source for these pages lives in [docs/](docs/) and deploys on merge to `main`.
 
 ## Contributing
 
