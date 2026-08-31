@@ -146,24 +146,34 @@ class MyProvider(ProviderInterface):
         """
         # Coerce through float(): some APIs send integral values
         # float-formatted ("499.0"), which a bare int() rejects.
-        def as_int(name: str, default: int) -> int:
+        #
+        # Return None for an absent header rather than a default. Every
+        # RateLimitInfo field is Optional precisely so that "the server did
+        # not say" stays distinguishable from a real value all the way down
+        # to the backend, which syncs the request and token dimensions
+        # independently and leaves an unreported one untouched. Substituting
+        # a number here fabricates a window the server never described, and
+        # the backend will then mark it verified.
+        def as_int(name: str) -> Optional[int]:
             try:
                 return int(float(headers[name]))
             except (KeyError, TypeError, ValueError):
-                return default
+                return None
 
         return RateLimitInfo(
-            rpm_remaining=as_int("x-ratelimit-remaining-requests", 100),
-            rpm_limit=as_int("x-ratelimit-limit-requests", 100),
+            rpm_remaining=as_int("x-ratelimit-remaining-requests"),
+            rpm_limit=as_int("x-ratelimit-limit-requests"),
             # Absolute Unix seconds. If your API sends epoch milliseconds,
             # divide by 1000; if it sends "seconds until reset", add time.time().
             rpm_reset=float(headers["x-ratelimit-reset-requests"])
             if "x-ratelimit-reset-requests" in headers
             else None,
-            tpm_remaining=as_int("x-ratelimit-remaining-tokens", 10000),
-            tpm_limit=as_int("x-ratelimit-limit-tokens", 10000),
+            # A provider that meters requests but not tokens simply leaves
+            # these None; the request dimension still syncs normally.
+            tpm_remaining=as_int("x-ratelimit-remaining-tokens"),
+            tpm_limit=as_int("x-ratelimit-limit-tokens"),
             is_rate_limited=(status_code == 429),
-            retry_after=as_int("retry-after", 0) if status_code == 429 else None,
+            retry_after=as_int("retry-after") if status_code == 429 else None,
         )
 
     async def get_bucket_for_model(
@@ -229,8 +239,11 @@ class MyProvider(ProviderInterface):
         return {"gpt-5": DiscoveredBucket(bucket_id="gpt-5", rpm_limit=100, tpm_limit=10000)}
 
     def parse_rate_limit_response(self, headers, body=None, status_code=None) -> RateLimitInfo:
+        raw = headers.get("x-ratelimit-remaining-requests")
         return RateLimitInfo(
-            rpm_remaining=int(float(headers.get("x-ratelimit-remaining-requests", 100))),
+            # Leave the field None when the header is absent -- do not
+            # substitute a default. See the note on as_int() above.
+            rpm_remaining=int(float(raw)) if raw is not None else None,
             is_rate_limited=(status_code == 429),
         )
 
@@ -343,12 +356,19 @@ class OpenAIProvider(ProviderInterface):
     def parse_rate_limit_response(
         self, headers: Dict[str, str], body=None, status_code=None
     ) -> RateLimitInfo:
+        # int(float(...)): some APIs render integral values float-formatted.
+        # None for an absent header: a limit of 0 is a real, meaningful value
+        # ("no capacity on this dimension"), so it must not double as the
+        # placeholder for a header the server never sent.
+        def as_int(name: str) -> Optional[int]:
+            raw = headers.get(name)
+            return int(float(raw)) if raw is not None else None
+
         return RateLimitInfo(
-            # int(float(...)): some APIs render integral values float-formatted
-            rpm_remaining=int(float(headers.get("x-ratelimit-remaining-requests", 0))),
-            rpm_limit=int(float(headers.get("x-ratelimit-limit-requests", 0))),
-            tpm_remaining=int(float(headers.get("x-ratelimit-remaining-tokens", 0))),
-            tpm_limit=int(float(headers.get("x-ratelimit-limit-tokens", 0))),
+            rpm_remaining=as_int("x-ratelimit-remaining-requests"),
+            rpm_limit=as_int("x-ratelimit-limit-requests"),
+            tpm_remaining=as_int("x-ratelimit-remaining-tokens"),
+            tpm_limit=as_int("x-ratelimit-limit-tokens"),
             is_rate_limited=(status_code == 429),
             retry_after=float(headers.get("retry-after", 1)) if status_code == 429 else None,
         )
